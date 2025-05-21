@@ -325,10 +325,30 @@ class StrongboxParser:
                 wb = openpyxl.load_workbook(self.source_file, data_only=True)
                 tb_sheet = wb['TB']
                 
+                # Find Financial Statement Classification Path column
+                fin_statement_col = None
+                for row_idx in range(1, 8):  # Check first few rows for headers
+                    for col_idx in range(1, 25):  # Check first several columns
+                        cell_value = tb_sheet.cell(row=row_idx, column=col_idx).value
+                        if cell_value:
+                            cell_text = str(cell_value).lower()
+                            if 'financial statement classification' in cell_text or 'fin statement classification' in cell_text:
+                                fin_statement_col = col_idx
+                                print(f"Found Financial Statement Classification header in row {row_idx}, column {col_idx}: {cell_value}")
+                                break
+                    if fin_statement_col:
+                        break
+                
+                if not fin_statement_col:
+                    # Default to column C (3) as specified
+                    fin_statement_col = 3
+                    print(f"No Financial Statement Classification header found, using default column C (3)")
+                
                 # Print column indices for debugging
-                # print(f"\nColumn indices:") # Keep this commented unless specifically debugging TB date columns
-                # print(f"Begin date column index: {date_columns[closest_begin_date]}")
-                # print(f"End date column index: {date_columns[closest_end_date]}")
+                print(f"\nColumn indices:")
+                print(f"Begin date column index: {date_columns[closest_begin_date]}")
+                print(f"End date column index: {date_columns[closest_end_date]}")
+                print(f"Financial Statement Classification column index: {fin_statement_col}")
                 
                 data = []
                 for row_idx in range(8, tb_sheet.max_row + 1):
@@ -345,29 +365,35 @@ class StrongboxParser:
                             begin_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_begin_date] + 1)
                             end_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_end_date] + 1)
                             
-                            # Removed verbose row-by-row print statements for TB processing
-                            # print(f"\nRow {row_idx}:")
-                            # print(f"Account ID: {account_id} (type: {type(account_id)})")
-                            # print(f"Begin cell value: {begin_cell.value} (type: {type(begin_cell.value)})")
-                            # print(f"End cell value: {end_cell.value} (type: {type(end_cell.value)})")
+                            # Get Financial Statement Classification using the identified column
+                            fin_statement_class = tb_sheet.cell(row=row_idx, column=fin_statement_col).value
+                            
+                            # Debug output for Financial Statement Classification for the first few rows
+                            if row_idx < 12:
+                                print(f"Row {row_idx}, Account: {account_id}, Financial Statement Classification (Column {fin_statement_col}): {fin_statement_class}")
+                            
+                            # Handle different types appropriately
+                            if fin_statement_class is None:
+                                fin_statement_class = ''
+                            else:
+                                fin_statement_class = str(fin_statement_class).strip()
                             
                             try:
                                 begin_balance = float(begin_cell.value) if begin_cell.value is not None else 0.0
                             except (ValueError, TypeError):
-                                # print(f"Warning: TB Row {row_idx}: Could not convert begin balance '{begin_cell.value}' to float, using 0.0") # Optional: uncomment for deep TB debug
                                 begin_balance = 0.0
                                 
                             try:
                                 end_balance = float(end_cell.value) if end_cell.value is not None else 0.0
                             except (ValueError, TypeError):
-                                # print(f"Warning: TB Row {row_idx}: Could not convert end balance '{end_cell.value}' to float, using 0.0") # Optional: uncomment for deep TB debug
                                 end_balance = 0.0
                             
                             data.append({
                                 'Account Id': account_id,
                                 'Account Name': str(account_name).strip() if account_name is not None else '',
                                 'Beginning Balance': begin_balance,
-                                'Ending Balance': end_balance
+                                'Ending Balance': end_balance,
+                                'Financial Statement Classification': fin_statement_class
                             })
                     except Exception as e:
                         print(f"Error processing TB sheet row {row_idx}: {str(e)}. Skipping row.")
@@ -422,10 +448,10 @@ class StrongboxParser:
                 print("Creating required columns...")
                 processed_df = pd.DataFrame({
                     'Journal ID': df_copy['Transaction Id'],
-                    'Journal Entry Description': df_copy['Memo'],
+                    'Journal Entry Description': df_copy['Doc/Ref No'],
                     'Posted Date': df_copy['Transaction Date'],
                     'Account': df_copy['Account Id'],
-                    'Journal Line Description': df_copy['Doc/Ref No'],
+                    'Journal Line Description': df_copy['Memo'],
                     'Debit': df_copy['Debit'],
                     'Credit': df_copy['Credit']
                 })
@@ -472,7 +498,7 @@ class StrongboxParser:
             'Ending Balance': tb_data['Ending Balance'],
             'Account Type \n(see Mapping Categories tab)': '',
             'Account Mapping \n(see Mapping Categories tab)': '',
-            'Account Description': ''
+            'Account Description': tb_data['Financial Statement Classification']
         })
         
         # Debug info
@@ -591,7 +617,7 @@ class StrongboxParser:
                     'Ending Balance': 0.0,
                     'Account Type \n(see Mapping Categories tab)': '',
                     'Account Mapping \n(see Mapping Categories tab)': '',
-                    'Account Description': ''
+                    'Account Description': ''  # No Financial Statement Classification for missing accounts
                 })
         
         # Add missing accounts to trial balance
