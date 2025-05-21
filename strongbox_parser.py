@@ -24,63 +24,16 @@ class StrongboxParser:
 
     def update_status(self, message, progress=None):
         """Update the status message and progress bar"""
-        self.status_label.config(text=message)
-        if progress is not None:
+        if self.status_label:
+            self.status_label.config(text=message)
+        if progress is not None and self.progress_bar:
             self.progress_bar['value'] = progress
-        self.root.update()
+        if self.root:
+            self.root.update()
 
     def get_file_paths(self):
-        """Get source file, output directory and filename using GUI"""
-        self.update_status("Selecting source file...", 10)
-        self.source_file = filedialog.askopenfilename(
-            title="Select Strongbox File",
-            filetypes=[("Excel files", "*.xlsx")]
-        )
-        if not self.source_file:
-            raise Exception("No source file selected")
-
-        self.update_status("Selecting output directory...", 20)
-        self.output_dir = filedialog.askdirectory(
-            title="Select Output Directory"
-        )
-        if not self.output_dir:
-            raise Exception("No output directory selected")
-            
-        # Add filename entry dialog
-        self.update_status("Enter output filename...", 30)
-        
-        # Create a temporary dialog for filename entry
-        filename_dialog = tk.Toplevel(self.root)
-        filename_dialog.title("Output Filename")
-        filename_dialog.geometry("400x150")
-        filename_dialog.grab_set()  # Make the dialog modal
-        
-        filename_frame = ttk.Frame(filename_dialog, padding="20")
-        filename_frame.pack(fill=tk.BOTH, expand=True)
-        
-        ttk.Label(filename_frame, text="Output Filename:").grid(row=0, column=0, padx=5, pady=10, sticky=tk.W)
-        filename_entry = ttk.Entry(filename_frame, width=30)
-        filename_entry.grid(row=0, column=1, padx=5, pady=10)
-        filename_entry.insert(0, "Audit_Sight_Output")
-        
-        filename_result = [None]  # Use a list to store the result (closure workaround)
-        
-        def set_filename():
-            filename_result[0] = filename_entry.get()
-            if not filename_result[0]:
-                messagebox.showerror("Error", "Please enter an output filename", parent=filename_dialog)
-                return
-            filename_dialog.destroy()
-        
-        ttk.Button(filename_frame, text="Continue", command=set_filename).grid(row=1, column=0, columnspan=2, pady=10)
-        
-        # Wait for the dialog to close
-        self.root.wait_window(filename_dialog)
-        
-        if not filename_result[0]:
-            raise Exception("No output filename provided")
-            
-        self.output_filename = filename_result[0]
+        """DEPRECATED: Use select_source_file and select_output_location instead"""
+        pass
 
     def determine_date_range(self):
         """Automatically determine date range from TB tab"""
@@ -779,17 +732,30 @@ class StrongboxParser:
             self.root.title("Strongbox Parser")
             self.root.geometry("600x400")
 
+            # Create main frame
+            main_frame = ttk.Frame(self.root, padding="20")
+            main_frame.pack(fill=tk.BOTH, expand=True)
+
+            # Create title label
+            title_label = ttk.Label(main_frame, text="Strongbox Parser", font=("Helvetica", 16, "bold"))
+            title_label.pack(pady=20)
+
+            # Create description
+            description = ttk.Label(main_frame, text="This tool converts Strongbox Excel files to Audit Sight format.", wraplength=500)
+            description.pack(pady=10)
+
+            # Create source file selection button
+            source_button = ttk.Button(main_frame, text="Select Source File", command=self.select_source_file)
+            source_button.pack(pady=20)
+
             # Create status label
-            self.status_label = ttk.Label(self.root, text="Initializing...", wraplength=500)
-            self.status_label.grid(row=4, column=0, padx=10, pady=10)
+            self.status_label = ttk.Label(main_frame, text="Ready to start...", wraplength=500)
+            self.status_label.pack(pady=10)
 
             # Create progress bar
-            self.progress_bar = ttk.Progressbar(self.root, length=400, mode='determinate')
-            self.progress_bar.grid(row=5, column=0, padx=10, pady=10)
+            self.progress_bar = ttk.Progressbar(main_frame, length=400, mode='determinate')
+            self.progress_bar.pack(pady=10)
 
-            self.get_file_paths()
-            self.process_data()
-            
             # Start the main event loop
             self.root.mainloop()
         except Exception as e:
@@ -798,6 +764,51 @@ class StrongboxParser:
                 messagebox.showerror("Error", str(e))
             else:
                 messagebox.showerror("Error", str(e))
+                
+    def select_source_file(self):
+        """Select source file using file dialog"""
+        self.update_status("Selecting source file...", 10)
+        self.source_file = filedialog.askopenfilename(
+            title="Select Strongbox File",
+            filetypes=[("Excel files", "*.xlsx")]
+        )
+        if not self.source_file:
+            self.update_status("Operation cancelled: No source file selected", 0)
+            return
+            
+        self.update_status(f"Selected source file: {os.path.basename(self.source_file)}", 20)
+        # Proceed to next step - select output file
+        self.select_output_location()
+    
+    def select_output_location(self):
+        """Select output directory and filename at once using save file dialog"""
+        self.update_status("Selecting output location...", 30)
+        
+        # Use a save file dialog to get both the directory and filename at once
+        output_file = filedialog.asksaveasfilename(
+            title="Save Output File As",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile="Audit_Sight_Output.xlsx"
+        )
+        
+        if not output_file:
+            self.update_status("Operation cancelled: No output location selected", 0)
+            return
+            
+        # Split the output_file into directory and filename
+        self.output_dir = os.path.dirname(output_file)
+        self.output_filename = os.path.splitext(os.path.basename(output_file))[0]
+        
+        self.update_status(f"Selected output: {self.output_filename} in {self.output_dir}", 35)
+        
+        # Proceed to determine date range and process data
+        try:
+            # Process the data
+            self.process_data()
+        except Exception as e:
+            self.update_status(f"Error: {str(e)}", 0)
+            messagebox.showerror("Error", str(e))
 
 if __name__ == "__main__":
     parser = StrongboxParser()
