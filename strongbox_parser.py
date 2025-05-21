@@ -92,6 +92,13 @@ class StrongboxParser:
         
         return date_columns
 
+    def get_last_day_of_month(self, date):
+        """Return the last day of the month for a given date"""
+        # If the date is already the last day, just return it
+        next_month = date.replace(day=28) + relativedelta(days=4)  # Move to next month
+        last_day = next_month - relativedelta(days=next_month.day)  # Subtract days to get last day
+        return last_day
+
     def load_source_data(self):
         """Load data from source file"""
         try:
@@ -220,40 +227,103 @@ class StrongboxParser:
                         else:
                             print(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
                     
+                    # Check if both Transaction Date and Fiscal Month columns exist
+                    if 'Transaction Date' not in df.columns:
+                        print(f"WARNING: 'Transaction Date' column NOT FOUND in sheet {sheet_name}. Cannot filter by date.")
+                        print(f"Skipping sheet {sheet_name} due to missing 'Transaction Date' column.")
+                        continue
+                        
+                    # Process the Transaction Date and Fiscal Month columns
+                    print(f"INFO: 'Transaction Date' column found in {sheet_name}.")
+                    print(f"Sample raw 'Transaction Date' values in {sheet_name} before pd.to_datetime:")
+                    print(df['Transaction Date'].head(10) if len(df) > 0 else "Sheet is empty or has no dates")
+                    
                     # Convert Transaction Date to datetime
-                    if 'Transaction Date' in df.columns:
-                        print(f"INFO: 'Transaction Date' column found in {sheet_name}.")
-                        print(f"Sample raw 'Transaction Date' values in {sheet_name} before pd.to_datetime:")
-                        print(df['Transaction Date'].head(10) if len(df) > 0 else "Sheet is empty or has no dates")
+                    df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], errors='coerce')
+                    
+                    # Check if Fiscal Month column exists for date validation
+                    has_fiscal_month = 'Fiscal Month' in df.columns
+                    fiscal_month_dates = None
+                    
+                    if has_fiscal_month:
+                        print(f"INFO: 'Fiscal Month' column found in {sheet_name}.")
+                        print(f"Sample raw 'Fiscal Month' values in {sheet_name} before pd.to_datetime:")
+                        print(df['Fiscal Month'].head(10) if len(df) > 0 else "Sheet is empty or has no fiscal months")
                         
-                        df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], errors='coerce')
+                        # Convert Fiscal Month to datetime for comparison
+                        df['Fiscal Month'] = pd.to_datetime(df['Fiscal Month'], errors='coerce')
+                        fiscal_month_dates = df['Fiscal Month'].copy()
                         
-                        print(f"Sample 'Transaction Date' values in {sheet_name} after pd.to_datetime (before NaT filter):")
-                        print(df['Transaction Date'].head(10) if len(df) > 0 else "Sheet is empty or has no dates")
-                        
-                        # Count NaT values before filtering
-                        nat_count = df['Transaction Date'].isnull().sum()
-                        print(f"INFO: Found {nat_count} NaT (Not a Time) values in 'Transaction Date' for {sheet_name} after conversion.")
-                        
-                        # Filter out rows where date conversion failed (NaT)
-                        df = df[pd.notna(df['Transaction Date'])] 
-                        print(f"INFO: Rows in {sheet_name} after filtering NaT dates: {len(df)}")
-                        
-                        if len(df) > 0:
-                            mask = (df['Transaction Date'] >= self.start_date) & (df['Transaction Date'] <= self.end_date)
-                            df_filtered = df[mask]
-                            print(f"INFO: Rows in {sheet_name} after applying date range [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_filtered)}")
-                            if len(df_filtered) > 0:
-                                self.source_data[sheet_name] = df_filtered
+                        # Count NaT values in Fiscal Month
+                        fiscal_nat_count = df['Fiscal Month'].isnull().sum()
+                        print(f"INFO: Found {fiscal_nat_count} NaT values in 'Fiscal Month' for {sheet_name} after conversion.")
+                    
+                    # Count NaT values in Transaction Date
+                    transaction_nat_count = df['Transaction Date'].isnull().sum()
+                    print(f"INFO: Found {transaction_nat_count} NaT values in 'Transaction Date' for {sheet_name} after conversion.")
+                    
+                    # Filter out rows where date conversion failed (NaT) for Transaction Date
+                    df = df[pd.notna(df['Transaction Date'])]
+                    if has_fiscal_month:
+                        # Keep rows only where Fiscal Month is valid
+                        df = df[pd.notna(df['Fiscal Month'])]
+                    
+                    print(f"INFO: Rows in {sheet_name} after filtering NaT dates: {len(df)}")
+                    
+                    if len(df) > 0:
+                        # Check if the sheet has any rows in our date range
+                        # Use Fiscal Month for range filtering if available
+                        if has_fiscal_month:
+                            # Filter based on Fiscal Month for date range eligibility
+                            fiscal_month_mask = (df['Fiscal Month'] >= self.start_date) & (df['Fiscal Month'] <= self.end_date)
+                            df_in_range = df[fiscal_month_mask].copy()
+                            print(f"INFO: Rows in {sheet_name} with Fiscal Month in date range [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_in_range)}")
+                            
+                            if len(df_in_range) > 0:
+                                # Identify and fix Transaction Dates that don't match their Fiscal Month
+                                mismatched_dates = 0
+                                adjusted_dates = []
+                                
+                                for idx, row in df_in_range.iterrows():
+                                    transaction_date = row['Transaction Date']
+                                    fiscal_month = row['Fiscal Month']
+                                    
+                                    # Check if Transaction Date's month/year matches Fiscal Month's month/year
+                                    if (transaction_date.year != fiscal_month.year) or (transaction_date.month != fiscal_month.month):
+                                        # Get the last day of the Fiscal Month
+                                        last_day_of_month = self.get_last_day_of_month(fiscal_month)
+                                        adjusted_dates.append((idx, transaction_date, last_day_of_month))
+                                        # Update Transaction Date to the last day of the Fiscal Month
+                                        df_in_range.at[idx, 'Transaction Date'] = last_day_of_month
+                                        mismatched_dates += 1
+                                
+                                if mismatched_dates > 0:
+                                    print(f"INFO: Adjusted {mismatched_dates} Transaction Dates to match their Fiscal Month in {sheet_name}")
+                                    if len(adjusted_dates) > 0 and len(adjusted_dates) <= 10:
+                                        print("Sample of adjusted dates (idx, original_date, new_date):")
+                                        for adj in adjusted_dates[:10]:
+                                            print(f"  Row {adj[0]}: {adj[1].strftime('%Y-%m-%d')} -> {adj[2].strftime('%Y-%m-%d')}")
+                                
+                                # Add the dataframe to our source data
+                                self.source_data[sheet_name] = df_in_range
                                 print(f"Successfully added filtered data from {sheet_name} to source_data.")
                                 processed_txn_sheets_count += 1
                             else:
-                                print(f"INFO: No data from {sheet_name} within the specified date range. Sheet will not be in final output.")
+                                print(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
                         else:
-                            print(f"INFO: No valid dates found in {sheet_name} after NaT filtering. Sheet will not be in final output.")
+                            # If no Fiscal Month, fall back to Transaction Date filtering
+                            transaction_date_mask = (df['Transaction Date'] >= self.start_date) & (df['Transaction Date'] <= self.end_date)
+                            df_filtered = df[transaction_date_mask]
+                            print(f"INFO: Rows in {sheet_name} after applying date range to Transaction Date [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_filtered)}")
+                            
+                            if len(df_filtered) > 0:
+                                self.source_data[sheet_name] = df_filtered
+                                print(f"Successfully added filtered data from {sheet_name} to source_data using Transaction Date only.")
+                                processed_txn_sheets_count += 1
+                            else:
+                                print(f"INFO: No data from {sheet_name} within the specified date range based on Transaction Date. Sheet will not be in final output.")
                     else:
-                        print(f"WARNING: 'Transaction Date' column NOT FOUND in sheet {sheet_name}. Cannot filter by date.")
-                        print(f"Skipping sheet {sheet_name} due to missing 'Transaction Date' column.")
+                        print(f"INFO: No valid dates found in {sheet_name} after NaT filtering. Sheet will not be in final output.")
             
             if processed_txn_sheets_count == 0 and any(s.startswith('TXN-FY') for s in excel_file_pd.sheet_names):
                 message = "CRITICAL: No transaction (TXN-FY) sheets could be successfully processed after all attempts. The output may be incomplete or empty regarding journal entries. Please make sure to add all required journal entries to the template manually. Check the console logs for details on which sheets failed."
