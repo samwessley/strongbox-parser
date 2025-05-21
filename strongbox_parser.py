@@ -30,7 +30,7 @@ class StrongboxParser:
         self.root.update()
 
     def get_file_paths(self):
-        """Get source file and output directory using GUI"""
+        """Get source file, output directory and filename using GUI"""
         self.update_status("Selecting source file...", 10)
         self.source_file = filedialog.askopenfilename(
             title="Select Strongbox File",
@@ -45,59 +45,99 @@ class StrongboxParser:
         )
         if not self.output_dir:
             raise Exception("No output directory selected")
-
-    def get_date_range(self):
-        """Get date range using GUI"""
-        self.update_status("Enter date range...", 30)
+            
+        # Add filename entry dialog
+        self.update_status("Enter output filename...", 30)
         
-        # Create date entry widgets
-        start_frame = ttk.Frame(self.root, padding="10")
-        start_frame.grid(row=0, column=0, padx=5, pady=5)
-        ttk.Label(start_frame, text="Start Date:").grid(row=0, column=0)
-        start_date = ttk.Entry(start_frame)
-        start_date.grid(row=0, column=1)
-        start_date.insert(0, "MM/DD/YYYY")
-
-        end_frame = ttk.Frame(self.root, padding="10")
-        end_frame.grid(row=1, column=0, padx=5, pady=5)
-        ttk.Label(end_frame, text="End Date:").grid(row=0, column=0)
-        end_date = ttk.Entry(end_frame)
-        end_date.grid(row=0, column=1)
-        end_date.insert(0, "MM/DD/YYYY")
-
-        # Add filename entry
-        filename_frame = ttk.Frame(self.root, padding="10")
-        filename_frame.grid(row=2, column=0, padx=5, pady=5)
-        ttk.Label(filename_frame, text="Output Filename:").grid(row=0, column=0)
-        filename_entry = ttk.Entry(filename_frame)
-        filename_entry.grid(row=0, column=1)
+        # Create a temporary dialog for filename entry
+        filename_dialog = tk.Toplevel(self.root)
+        filename_dialog.title("Output Filename")
+        filename_dialog.geometry("400x150")
+        filename_dialog.grab_set()  # Make the dialog modal
+        
+        filename_frame = ttk.Frame(filename_dialog, padding="20")
+        filename_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(filename_frame, text="Output Filename:").grid(row=0, column=0, padx=5, pady=10, sticky=tk.W)
+        filename_entry = ttk.Entry(filename_frame, width=30)
+        filename_entry.grid(row=0, column=1, padx=5, pady=10)
         filename_entry.insert(0, "Audit_Sight_Output")
+        
+        filename_result = [None]  # Use a list to store the result (closure workaround)
+        
+        def set_filename():
+            filename_result[0] = filename_entry.get()
+            if not filename_result[0]:
+                messagebox.showerror("Error", "Please enter an output filename", parent=filename_dialog)
+                return
+            filename_dialog.destroy()
+        
+        ttk.Button(filename_frame, text="Continue", command=set_filename).grid(row=1, column=0, columnspan=2, pady=10)
+        
+        # Wait for the dialog to close
+        self.root.wait_window(filename_dialog)
+        
+        if not filename_result[0]:
+            raise Exception("No output filename provided")
+            
+        self.output_filename = filename_result[0]
 
-        def validate_inputs():
+    def determine_date_range(self):
+        """Automatically determine date range from TB tab"""
+        self.update_status("Determining date range from source file...", 40)
+        print("\nDetermining date range automatically from TB tab...")
+        
+        # Read row 4 to get the dates
+        date_row = pd.read_excel(self.source_file, sheet_name='TB', header=None, nrows=1, skiprows=3)
+        date_row = date_row.iloc[0]
+        
+        # Convert dates to datetime
+        date_columns = {}
+        for col_idx, value in enumerate(date_row):
             try:
-                start = datetime.strptime(start_date.get(), "%m/%d/%Y")
-                end = datetime.strptime(end_date.get(), "%m/%d/%Y")
-                if start > end:
-                    messagebox.showerror("Error", "Start date must be before end date")
-                    return
-                self.start_date = start
-                self.end_date = end
-                self.output_filename = filename_entry.get()
-                if not self.output_filename:
-                    messagebox.showerror("Error", "Please enter an output filename")
-                    return
-                # Hide the input widgets
-                start_frame.grid_remove()
-                end_frame.grid_remove()
-                filename_frame.grid_remove()
-                validate_button.grid_remove()
-                # Start processing
-                self.process_data()
-            except ValueError:
-                messagebox.showerror("Error", "Invalid date format. Use MM/DD/YYYY")
-
-        validate_button = ttk.Button(self.root, text="Start Processing", command=validate_inputs)
-        validate_button.grid(row=3, column=0, pady=10)
+                if pd.notna(value):
+                    # Try to handle different date formats
+                    if isinstance(value, str):
+                        # Try different date formats
+                        for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%m-%d-%Y', '%d-%b-%Y', '%d/%b/%Y']:
+                            try:
+                                date = datetime.strptime(value, fmt)
+                                date_columns[date] = col_idx
+                                break
+                            except ValueError:
+                                continue
+                    else:
+                        date = pd.to_datetime(value)
+                        date_columns[date] = col_idx
+            except Exception as e:
+                print(f"Error processing date at column {col_idx}: {str(e)}")
+                continue
+        
+        if not date_columns:
+            raise Exception("No valid dates found in row 4 of the TB sheet. Please ensure dates are in a standard format.")
+        
+        # Find the earliest and latest dates in the TB sheet
+        all_dates = sorted(date_columns.keys())
+        
+        if len(all_dates) < 2:
+            raise Exception("Not enough dates found in TB sheet. Need at least two dates for beginning and ending balances.")
+        
+        # Use the earliest date as beginning balance date
+        self.begin_balance_date = all_dates[0]
+        # Use the latest date as ending balance date
+        self.end_date = all_dates[-1]
+        # Start date for transactions is one day after begin balance date
+        self.start_date = self.begin_balance_date + relativedelta(days=1)
+        
+        # Print the determined date range
+        print(f"Automatically determined date range:")
+        print(f"Beginning Balance Date: {self.begin_balance_date.strftime('%Y-%m-%d')}")
+        print(f"Transaction Start Date: {self.start_date.strftime('%Y-%m-%d')}")
+        print(f"Ending Balance Date: {self.end_date.strftime('%Y-%m-%d')}")
+        
+        self.update_status(f"Date range determined: {self.start_date.strftime('%m/%d/%Y')} - {self.end_date.strftime('%m/%d/%Y')}", 45)
+        
+        return date_columns
 
     def load_source_data(self):
         """Load data from source file"""
@@ -271,53 +311,19 @@ class StrongboxParser:
             print("\nLoading trial balance data...")
             self.update_status("Loading trial balance data...", 50)
             
-            # First read row 4 to get the dates
-            print("Reading date row from TB sheet...")
-            date_row = pd.read_excel(self.source_file, sheet_name='TB', header=None, nrows=1, skiprows=3)
-            date_row = date_row.iloc[0]
-            print(f"Date row values: {date_row.values}")
+            # Get the date_columns that were determined in determine_date_range
+            date_columns = self.date_columns
             
-            # Convert dates to datetime and find the closest dates to our target dates
-            date_columns = {}
-            for col_idx, value in enumerate(date_row):
-                try:
-                    if pd.notna(value):
-                        # Try to handle different date formats
-                        if isinstance(value, str):
-                            # Try different date formats
-                            for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%m-%d-%Y', '%d-%b-%Y', '%d/%b/%Y']:
-                                try:
-                                    date = datetime.strptime(value, fmt)
-                                    date_columns[date] = col_idx
-                                    print(f"Found date column: {date} at index {col_idx}")
-                                    break
-                                except ValueError:
-                                    continue
-                        else:
-                            date = pd.to_datetime(value)
-                            date_columns[date] = col_idx
-                            print(f"Found date column: {date} at index {col_idx}")
-                except Exception as e:
-                    print(f"Error processing date at column {col_idx}: {str(e)}")
-                    continue
-            
-            if not date_columns:
-                raise Exception("No valid dates found in row 4 of the TB sheet. Please ensure dates are in a standard format (MM/DD/YYYY, YYYY-MM-DD, etc.)")
-            
-            # Find the closest dates to our target dates
-            begin_date = (self.start_date - relativedelta(days=1)).replace(day=calendar.monthrange(
-                (self.start_date - relativedelta(days=1)).year,
-                (self.start_date - relativedelta(days=1)).month
-            )[1])
-            
-            closest_begin_date = min(date_columns.keys(), key=lambda x: abs((x - begin_date).days))
-            closest_end_date = min(date_columns.keys(), key=lambda x: abs((x - self.end_date).days))
+            # Use the beginning and ending dates already identified
+            begin_date = self.begin_balance_date
+            closest_begin_date = self.begin_balance_date  # Using exact date, not closest
+            closest_end_date = self.end_date  # Using exact date, not closest
             
             print(f"\nTarget dates:")
             print(f"Begin date: {begin_date}")
             print(f"End date: {self.end_date}")
-            print(f"Closest begin date: {closest_begin_date}")
-            print(f"Closest end date: {closest_end_date}")
+            print(f"Begin balance date (exact): {closest_begin_date}")
+            print(f"End balance date (exact): {closest_end_date}")
             
             # Now read the actual data with data_only=True to evaluate formulas
             # Open the workbook
@@ -750,8 +756,15 @@ class StrongboxParser:
     def process_data(self):
         """Process the data and create output file"""
         try:
+            # Determine date range automatically
+            self.date_columns = self.determine_date_range()
+            
+            # Load source data using the determined date range
             self.load_source_data()
+            
+            # Create output file
             output_file = self.create_output_file()
+            
             self.update_status(f"File created successfully at:\n{output_file}", 100)
             messagebox.showinfo("Success", f"File created successfully at:\n{output_file}")
         except Exception as e:
@@ -775,7 +788,7 @@ class StrongboxParser:
             self.progress_bar.grid(row=5, column=0, padx=10, pady=10)
 
             self.get_file_paths()
-            self.get_date_range()
+            self.process_data()
             
             # Start the main event loop
             self.root.mainloop()
