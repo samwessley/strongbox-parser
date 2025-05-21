@@ -8,7 +8,6 @@ from tkinter import ttk
 import calendar
 import openpyxl
 from copy import copy
-import xlwings as xw
 
 class StrongboxParser:
     def __init__(self):
@@ -322,10 +321,9 @@ class StrongboxParser:
             
             # Now read the actual data with data_only=True to evaluate formulas
             # Open the workbook
-            app = xw.App(visible=False)
             try:
-                wb = app.books.open(self.source_file)
-                tb_sheet = wb.sheets["TB"]
+                wb = openpyxl.load_workbook(self.source_file, data_only=True)
+                tb_sheet = wb['TB']
                 
                 # Print column indices for debugging
                 # print(f"\nColumn indices:") # Keep this commented unless specifically debugging TB date columns
@@ -333,14 +331,19 @@ class StrongboxParser:
                 # print(f"End date column index: {date_columns[closest_end_date]}")
                 
                 data = []
-                for row_idx in range(8, tb_sheet.used_range.last_cell.row + 1):
+                for row_idx in range(8, tb_sheet.max_row + 1):
                     try:
-                        account_id = tb_sheet.cells(row_idx, 4).value
+                        account_id = tb_sheet.cell(row=row_idx, column=4).value
                         if account_id is not None:
                             account_id = str(account_id).strip()
-                            account_name = tb_sheet.cells(row_idx, 6).value
-                            begin_cell = tb_sheet.cells(row_idx, date_columns[closest_begin_date] + 1)
-                            end_cell = tb_sheet.cells(row_idx, date_columns[closest_end_date] + 1)
+                            # Only skip rows with exact header matches, not all rows containing "account"
+                            if account_id.lower() == "account id" or account_id.lower() == "account":
+                                print(f"Skipping header row {row_idx} with account_id: {account_id}")
+                                continue
+                                
+                            account_name = tb_sheet.cell(row=row_idx, column=6).value
+                            begin_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_begin_date] + 1)
+                            end_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_end_date] + 1)
                             
                             # Removed verbose row-by-row print statements for TB processing
                             # print(f"\nRow {row_idx}:")
@@ -378,8 +381,8 @@ class StrongboxParser:
                 self.source_data['TB'] = tb_data
                 
             finally:
-                wb.close()
-                app.quit()
+                # No need to explicitly close workbook with openpyxl as it doesn't keep file handles open
+                pass
 
         except Exception as e:
             print(f"Error loading source data: {str(e)}")
@@ -457,6 +460,10 @@ class StrongboxParser:
         self.update_status("Creating trial balance...", 70)
         tb_data = self.source_data['TB']
         
+        # Only filter out exact header matches, not all rows containing "account"
+        tb_data = tb_data[~((tb_data['Account Id'].str.lower() == "account id") | 
+                           (tb_data['Account Id'].str.lower() == "account"))]
+        
         # Create new dataframe with required columns
         trial_balance = pd.DataFrame({
             'Account ID': tb_data['Account Id'],
@@ -467,6 +474,36 @@ class StrongboxParser:
             'Account Mapping \n(see Mapping Categories tab)': '',
             'Account Description': ''
         })
+        
+        # Debug info
+        print("\nTrial Balance DataFrame - first few rows:")
+        print(f"Column names: {trial_balance.columns.tolist()}")
+        print("First 5 rows:")
+        print(trial_balance.head(5))
+        print(f"Total rows in trial balance: {len(trial_balance)}")
+        
+        # Calculate sum of beginning and ending balances
+        begin_sum = trial_balance['Beginning Balance \n(Prior Period Balance)'].sum()
+        end_sum = trial_balance['Ending Balance'].sum()
+        print(f"Sum of Beginning Balances: {begin_sum}")
+        print(f"Sum of Ending Balances: {end_sum}")
+        
+        # Only remove rows that are definitely headers (contain exactly "Account ID")
+        headers_to_remove = []
+        for idx, row in trial_balance.iterrows():
+            account_id = str(row['Account ID']).lower() if pd.notna(row['Account ID']) else ""
+            if account_id == "account id" or account_id == "account":
+                headers_to_remove.append(idx)
+                print(f"Removing header row: {row['Account ID']}")
+        
+        if headers_to_remove:
+            trial_balance = trial_balance.drop(headers_to_remove)
+        
+        # Verify there are no empty account IDs but don't filter out other accounts
+        trial_balance = trial_balance[trial_balance['Account ID'].notna() & (trial_balance['Account ID'] != '')]
+        
+        # Reset the index after filtering
+        trial_balance = trial_balance.reset_index(drop=True)
         
         return trial_balance
 
@@ -479,83 +516,209 @@ class StrongboxParser:
             f"{self.output_filename}_{self.start_date.strftime('%Y%m%d')}_{self.end_date.strftime('%Y%m%d')}.xlsx"
         )
         
-        # Create Excel writer
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            # Write Comparative Trial Balances first
-            trial_balance = self.create_trial_balance()
-            trial_balance.to_excel(writer, sheet_name='Comparative Trial Balances', index=False, startrow=1)
-            
-            # Write Journal Entries & Lines
-            journal_entries = self.create_journal_entries()
-            journal_entries.to_excel(writer, sheet_name='Journal Entries & Lines', index=False, startrow=1)
-            
-            # Copy additional tabs from template
-            self.update_status("Copying additional tabs...", 90)
-            template = pd.ExcelFile('Audit Sight Template.xlsx')
-            additional_tabs = ['Instructions', 'Data Validation Tests', 'Notes', 'Banking Accts', 'Banking Txns', 'Mapping Categories']
-            
-            for sheet_name in additional_tabs:
-                if sheet_name in template.sheet_names:
-                    template_sheet = template.parse(sheet_name)
-                    template_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            # Apply formatting and add required/optional labels
-            self.update_status("Applying formatting...", 95)
-            workbook = writer.book
-            
-            # Format Comparative Trial Balances
-            tb_sheet = workbook['Comparative Trial Balances']
-            # Add required/optional labels
-            for col in range(1, 6):  # Columns A-E
-                tb_sheet.cell(row=1, column=col, value='Required')
-            for col in range(6, 8):  # Columns F-G
-                tb_sheet.cell(row=1, column=col, value='Optional')
-            
-            # Format Journal Entries & Lines
-            je_sheet = workbook['Journal Entries & Lines']
-            # Add required/optional labels
-            required_cols = [1, 3, 4, 6, 7]  # A, C, D, F, G
-            optional_cols = [2, 5]  # B, E
-            for col in required_cols:
-                je_sheet.cell(row=1, column=col, value='Required')
-            for col in optional_cols:
-                je_sheet.cell(row=1, column=col, value='Optional')
-            
-            # Copy formatting from template
-            template_wb = openpyxl.load_workbook('Audit Sight Template.xlsx')
-            
-            # Copy header formatting for Comparative Trial Balances
-            template_tb = template_wb['Comparative Trial Balances']
-            for col in range(1, 8):  # Columns A-G
-                template_cell = template_tb.cell(row=2, column=col)
-                tb_cell = tb_sheet.cell(row=2, column=col)
-                tb_cell.fill = copy(template_cell.fill)
-                tb_cell.font = copy(template_cell.font)
-            
-            # Copy header formatting for Journal Entries & Lines
-            template_je = template_wb['Journal Entries & Lines']
-            for col in range(1, 8):  # Columns A-G
-                template_cell = template_je.cell(row=2, column=col)
-                je_cell = je_sheet.cell(row=2, column=col)
-                je_cell.fill = copy(template_cell.fill)
-                je_cell.font = copy(template_cell.font)
-            
-            # Copy formatting for additional tabs
-            for sheet_name in additional_tabs:
+        # Create a new workbook from scratch with no external links
+        workbook = openpyxl.Workbook()
+        
+        # Define the tab order
+        tab_order = [
+            'Instructions', 
+            'Data Validation Tests', 
+            'Notes', 
+            'Comparative Trial Balances',
+            'Journal Entries & Lines', 
+            'Banking Accts', 
+            'Banking Txns', 
+            'Mapping Categories'
+        ]
+        
+        # Remove default sheet
+        if 'Sheet' in workbook.sheetnames:
+            default_sheet = workbook['Sheet']
+            workbook.remove(default_sheet)
+        
+        # Create each sheet in the desired order
+        for sheet_name in tab_order:
+            workbook.create_sheet(sheet_name)
+        
+        # Set tab colors
+        tab_colors = {
+            'Instructions': '002060',
+            'Data Validation Tests': '002060',
+            'Notes': '002060',
+            'Mapping Categories': '0070C0'
+        }
+        
+        for sheet_name, color_code in tab_colors.items():
+            if sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                sheet.sheet_properties.tabColor = color_code
+        
+        # Load the trial balance data
+        self.update_status("Creating trial balance...", 85)
+        trial_balance = self.create_trial_balance()
+        
+        # Process the Journal Entries & Lines
+        self.update_status("Creating journal entries...", 90)
+        journal_entries = self.create_journal_entries()
+        
+        # Add accounts from journal entries that are missing from trial balance
+        print("\nChecking for accounts in journal entries that are missing from trial balance...")
+        self.update_status("Adding missing accounts to trial balance...", 87)
+        
+        # Get all account IDs in trial balance
+        tb_account_ids = set(trial_balance['Account ID'].astype(str))
+        
+        # Get all unique accounts from journal entries with their account names
+        je_accounts = {}
+        if 'Account' in journal_entries.columns and len(journal_entries) > 0:
+            # Get unique account ID and account name pairs from transaction data
+            for sheet_name, df in self.source_data.items():
+                if sheet_name.startswith('TXN-FY') and 'Account Id' in df.columns and 'Account Name' in df.columns:
+                    for _, row in df.iterrows():
+                        account_id = str(row['Account Id'])
+                        account_name = str(row['Account Name']) if pd.notna(row['Account Name']) else ''
+                        je_accounts[account_id] = account_name
+        
+        # Find accounts in journal entries but not in trial balance
+        missing_accounts = []
+        for account_id, account_name in je_accounts.items():
+            if account_id not in tb_account_ids and account_id.strip() != '':
+                print(f"Found missing account in journal entries: {account_id} - {account_name}")
+                missing_accounts.append({
+                    'Account ID': account_id,
+                    'Account Name': account_name,
+                    'Beginning Balance \n(Prior Period Balance)': 0.0,
+                    'Ending Balance': 0.0,
+                    'Account Type \n(see Mapping Categories tab)': '',
+                    'Account Mapping \n(see Mapping Categories tab)': '',
+                    'Account Description': ''
+                })
+        
+        # Add missing accounts to trial balance
+        if missing_accounts:
+            missing_df = pd.DataFrame(missing_accounts)
+            trial_balance = pd.concat([trial_balance, missing_df], ignore_index=True)
+            print(f"Added {len(missing_accounts)} missing accounts to trial balance")
+        
+        # Process the TB sheet
+        tb_sheet = workbook['Comparative Trial Balances']
+        
+        # Add required/optional labels to row 1
+        for col in range(1, 6):  # Columns A-E
+            tb_sheet.cell(row=1, column=col, value='Required')
+        for col in range(6, 8):  # Columns F-G
+            tb_sheet.cell(row=1, column=col, value='Optional')
+        
+        # Add column headers to row 2
+        for col_idx, column_name in enumerate(trial_balance.columns, 1):
+            tb_sheet.cell(row=2, column=col_idx, value=column_name)
+        
+        # Add data starting at row 3
+        for row_idx, row in enumerate(trial_balance.iterrows(), 3):
+            for col_idx, col_name in enumerate(trial_balance.columns, 1):
+                tb_sheet.cell(row=row_idx, column=col_idx, value=row[1][col_name])
+        
+        # Set column widths for Comparative Trial Balances
+        column_widths = {
+            'A': 148/7,  # Approximate conversion from pixels to Excel units
+            'B': 294/7,
+            'C': 154/7,
+            'D': 154/7,
+            'E': 294/7,
+            'F': 302/7,
+            'G': 162/7
+        }
+        
+        for col_letter, width in column_widths.items():
+            tb_sheet.column_dimensions[col_letter].width = width
+        
+        # Process the Journal Entries & Lines sheet
+        je_sheet = workbook['Journal Entries & Lines']
+        
+        # Add required/optional labels to row 1
+        required_cols = [1, 3, 4, 6, 7]  # A, C, D, F, G
+        optional_cols = [2, 5]  # B, E
+        for col in required_cols:
+            je_sheet.cell(row=1, column=col, value='Required')
+        for col in optional_cols:
+            je_sheet.cell(row=1, column=col, value='Optional')
+        
+        # Add column headers to row 2
+        for col_idx, column_name in enumerate(journal_entries.columns, 1):
+            je_sheet.cell(row=2, column=col_idx, value=column_name)
+        
+        # Add data starting at row 3
+        for row_idx, row in enumerate(journal_entries.iterrows(), 3):
+            for col_idx, col_name in enumerate(journal_entries.columns, 1):
+                je_sheet.cell(row=row_idx, column=col_idx, value=row[1][col_name])
+        
+        # Copy templates for the other tabs - SAFELY with no external links
+        self.update_status("Copying templates for other tabs...", 95)
+        template_wb = openpyxl.load_workbook('Audit Sight Template.xlsx', data_only=True, keep_links=False)
+        
+        # Copy content from template without formulas or links
+        for sheet_name in tab_order:
+            if sheet_name not in ['Comparative Trial Balances', 'Journal Entries & Lines']:
                 if sheet_name in template_wb.sheetnames:
                     template_sheet = template_wb[sheet_name]
                     output_sheet = workbook[sheet_name]
                     
-                    # Copy all formatting from template sheet
+                    # Copy content but not formulas, links or connections
                     for row in template_sheet.rows:
                         for cell in row:
-                            output_cell = output_sheet.cell(row=cell.row, column=cell.column)
-                            output_cell.fill = copy(cell.fill)
-                            output_cell.font = copy(cell.font)
-                            output_cell.border = copy(cell.border)
-                            output_cell.alignment = copy(cell.alignment)
-                            output_cell.number_format = cell.number_format
-
+                            # Get the cell value only, ignoring formulas
+                            cell_value = cell.value
+                            
+                            # Avoid copying hyperlinks or external references
+                            if isinstance(cell_value, str) and (cell_value.startswith('http') or cell_value.startswith('=')):
+                                if cell_value.startswith('='):
+                                    # Replace formula with its value or empty string
+                                    cell_value = ""
+                            
+                            # Set the cell value directly without links
+                            output_cell = output_sheet.cell(row=cell.row, column=cell.column, value=cell_value)
+                            
+                            # Copy only safe styling elements
+                            if cell.has_style:
+                                output_cell.font = copy(cell.font)
+                                output_cell.border = copy(cell.border)
+                                output_cell.fill = copy(cell.fill)
+                                output_cell.number_format = cell.number_format
+                                output_cell.alignment = copy(cell.alignment)
+        
+        # Apply safe header formatting
+        self.update_status("Applying formatting...", 98)
+        if 'Comparative Trial Balances' in template_wb.sheetnames:
+            template_tb = template_wb['Comparative Trial Balances']
+            for col in range(1, 8):  # Columns A-G
+                if col <= len(trial_balance.columns):
+                    template_cell = template_tb.cell(row=2, column=col)
+                    tb_cell = tb_sheet.cell(row=2, column=col)
+                    if template_cell.has_style:
+                        tb_cell.font = copy(template_cell.font)
+                        tb_cell.fill = copy(template_cell.fill)
+        
+        if 'Journal Entries & Lines' in template_wb.sheetnames:
+            template_je = template_wb['Journal Entries & Lines']
+            for col in range(1, 8):  # Columns A-G
+                if col <= len(journal_entries.columns):
+                    template_cell = template_je.cell(row=2, column=col)
+                    je_cell = je_sheet.cell(row=2, column=col)
+                    if template_cell.has_style:
+                        je_cell.font = copy(template_cell.font)
+                        je_cell.fill = copy(template_cell.fill)
+        
+        # Ensure no external links exist
+        if hasattr(workbook, 'external_links'):
+            workbook.external_links.clear()
+            
+        # Turn off external data connections
+        workbook.properties.externalReferences = False
+        
+        # Save the workbook with properties to avoid external content warnings
+        self.update_status("Saving workbook...", 99)
+        workbook.save(output_file)
+        
         return output_file
 
     def process_data(self):
