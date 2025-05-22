@@ -530,6 +530,17 @@ class StrongboxParser:
             'Account Description': tb_data['Financial Statement Classification']
         })
         
+        # Apply the class method to populate the Account Type column
+        trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
+        
+        # Count how many accounts were classified for each type
+        account_type_counts = trial_balance['Account Type \n(see Mapping Categories tab)'].value_counts()
+        print("\nAccount Type classification summary:")
+        for account_type, count in account_type_counts.items():
+            if account_type != '':
+                print(f"  {account_type}: {count} accounts")
+        print(f"  Unclassified: {(trial_balance['Account Type \n(see Mapping Categories tab)'] == '').sum()} accounts")
+        
         # Debug info
         print("\nTrial Balance DataFrame - first few rows:")
         print(f"Column names: {trial_balance.columns.tolist()}")
@@ -639,14 +650,29 @@ class StrongboxParser:
         for account_id, account_name in je_accounts.items():
             if account_id not in tb_account_ids and account_id.strip() != '':
                 print(f"Found missing account in journal entries: {account_id} - {account_name}")
+                
+                # Get Financial Statement Classification if available
+                fin_statement_class = ''
+                account_type = ''
+                
+                # Try to find Financial Statement Classification from transaction data
+                for sheet_name, df in self.source_data.items():
+                    if sheet_name.startswith('TXN-FY') and 'Account Id' in df.columns and 'Financial Statement Classification' in df.columns:
+                        matching_rows = df[df['Account Id'] == account_id]
+                        if not matching_rows.empty and not pd.isna(matching_rows['Financial Statement Classification'].iloc[0]):
+                            fin_statement_class = matching_rows['Financial Statement Classification'].iloc[0]
+                            # Determine account type using the shared method
+                            account_type = self.determine_account_type(fin_statement_class)
+                            break
+                
                 missing_accounts.append({
                     'Account ID': account_id,
                     'Account Name': account_name,
                     'Beginning Balance \n(Prior Period Balance)': 0.0,
                     'Ending Balance': 0.0,
-                    'Account Type \n(see Mapping Categories tab)': '',
+                    'Account Type \n(see Mapping Categories tab)': account_type,
                     'Account Mapping \n(see Mapping Categories tab)': '',
-                    'Account Description': ''  # No Financial Statement Classification for missing accounts
+                    'Account Description': fin_statement_class
                 })
         
         # Add missing accounts to trial balance
@@ -879,6 +905,28 @@ class StrongboxParser:
         except Exception as e:
             self.update_status(f"Error: {str(e)}", 0)
             messagebox.showerror("Error", str(e))
+
+    def determine_account_type(self, fs_classification):
+        """Determine Account Type based on Financial Statement Classification Path"""
+        if pd.isna(fs_classification) or fs_classification == '':
+            return ''
+            
+        fs_classification = str(fs_classification).strip()
+        
+        if fs_classification.startswith('Total Assets'):
+            return 'Assets'
+        elif fs_classification.startswith('Total Liabilities and Equity → Total Liabilities'):
+            return 'Liabilities'
+        elif fs_classification.startswith('Total Liabilities and Equity → Total Equity'):
+            return 'Equity'
+        elif fs_classification.startswith('Net Income → Operating Profit → Gross Profit → Total Net Sales'):
+            return 'Income'
+        elif fs_classification.startswith('Net Income → Operating Profit → Gross Profit → Total COGS/COS'):
+            return 'Expense'
+        elif fs_classification.startswith('Net Income → Operating Profit → Total Operating Expenses'):
+            return 'Expense'
+        else:
+            return ''
 
 if __name__ == "__main__":
     parser = StrongboxParser()
