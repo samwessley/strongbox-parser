@@ -10,11 +10,17 @@ a = Analysis(
         'pandas',
         'openpyxl',
         'dateutil',
+        'dateutil.relativedelta',
         'tkinter',
         'tkinter.ttk',
         'tkinter.scrolledtext',
         'tkinter.filedialog',
-        'tkinter.messagebox'
+        'tkinter.messagebox',
+        'math',
+        'calendar',
+        'copy',
+        'sys',
+        'os'
     ],
     hookspath=[],
     hooksconfig={},

@@ -16,7 +16,7 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
@@ -24,27 +24,48 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pandas openpyxl python-dateutil pyinstaller
+        pip list
     
-    - name: Build Windows executable
+    - name: Test Python script
       run: |
-        pyinstaller strongbox_parser.spec
+        python -c "import pandas, openpyxl, dateutil, tkinter, math, calendar, copy, sys, os; print('All imports successful')"
+    
+    - name: Build Windows executable (Method 1 - Build Script)
+      run: |
+        python build_executable.py
+      continue-on-error: true
+      id: build1
+    
+    - name: Build Windows executable (Method 2 - Spec File)
+      if: steps.build1.outcome == 'failure'
+      run: |
+        pyinstaller --clean strongbox_parser.spec
+      continue-on-error: true
+      id: build2
+      
+    - name: Build Windows executable (Method 3 - Direct Command)
+      if: steps.build1.outcome == 'failure' && steps.build2.outcome == 'failure'
+      run: |
+        pyinstaller --onefile --windowed --name StrongboxParser strongbox_parser.py
+    
+    - name: Check build results
+      run: |
+        echo "Checking dist folder..."
+        dir dist
+        if exist "dist\StrongboxParser.exe" (
+          echo "Build successful!"
+          dir "dist\StrongboxParser.exe"
+        ) else (
+          echo "Build failed - executable not found"
+          exit 1
+        )
     
     - name: Upload Windows executable
       uses: actions/upload-artifact@v4
       with:
         name: strongbox-parser-windows
         path: dist/StrongboxParser.exe
-        
-    - name: Create release asset (on release)
-      if: github.event_name == 'release'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: dist/StrongboxParser.exe
-        asset_name: StrongboxParser-Windows.exe
-        asset_content_type: application/octet-stream
+        if-no-files-found: error
 
   build-macos:
     runs-on: macos-latest
@@ -53,7 +74,7 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
     
@@ -61,17 +82,49 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pandas openpyxl python-dateutil pyinstaller
+        pip list
     
-    - name: Build Mac executable
+    - name: Test Python script
       run: |
-        pyinstaller strongbox_parser.spec
+        python -c "import pandas, openpyxl, dateutil, tkinter, math, calendar, copy, sys, os; print('All imports successful')"
+    
+    - name: Build Mac executable (Method 1 - Build Script)
+      run: |
+        python build_executable.py
+      continue-on-error: true
+      id: build1
+    
+    - name: Build Mac executable (Method 2 - Spec File)
+      if: steps.build1.outcome == 'failure'
+      run: |
+        pyinstaller --clean strongbox_parser.spec
+      continue-on-error: true
+      id: build2
+      
+    - name: Build Mac executable (Method 3 - Direct Command)
+      if: steps.build1.outcome == 'failure' && steps.build2.outcome == 'failure'
+      run: |
+        pyinstaller --onefile --windowed --name StrongboxParser strongbox_parser.py
+    
+    - name: Check build results
+      run: |
+        echo "Checking dist folder..."
+        ls -la dist/
+        if [ -f "dist/StrongboxParser" ]; then
+          echo "Build successful!"
+          ls -la dist/StrongboxParser
+        else
+          echo "Build failed - executable not found"
+          exit 1
+        fi
     
     - name: Upload Mac executable
       uses: actions/upload-artifact@v4
       with:
         name: strongbox-parser-macos
         path: dist/StrongboxParser
-        
+        if-no-files-found: error
+
     - name: Create release asset (on release)
       if: github.event_name == 'release'
       uses: actions/upload-release-asset@v1
