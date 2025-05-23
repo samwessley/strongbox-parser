@@ -559,21 +559,20 @@ class StrongboxParser:
         return workbook, styles
 
     def _create_other_sheets(self, workbook, styles):
-        """Create and format all other sheets (Instructions, Data Validation Tests, Notes, Banking sheets, etc.)"""
-        # Create all sheets in the correct order first
-        # Instructions sheet
+        """Create and format all other sheets in the specified order"""
+        # Create Instructions sheet
         instructions_sheet = workbook.create_sheet('Instructions')
         instructions_sheet.append(['Content for Instructions'])
         
-        # Data Validation Tests sheet
+        # Create Data Validation Tests sheet
         validation_sheet = workbook.create_sheet('Data Validation Tests')
         validation_sheet.append(['Content for Data Validation Tests'])
         
-        # Notes sheet
+        # Create Notes sheet
         notes_sheet = workbook.create_sheet('Notes')
         notes_sheet.append(['Content for Notes'])
         
-        # Banking Accts sheet with specific formatting
+        # Create Banking Accts sheet with specific formatting
         banking_accts_sheet = workbook.create_sheet('Banking Accts')
         
         # Add headers for Banking Accts
@@ -600,7 +599,7 @@ class StrongboxParser:
             cell.fill = styles['dark_blue_fill']
             cell.alignment = styles['center_alignment']
         
-        # Banking Txn sheet with specific formatting
+        # Create Banking Txn sheet with specific formatting
         banking_txn_sheet = workbook.create_sheet('Banking Txn')
         
         # Add headers for Banking Txn
@@ -621,7 +620,7 @@ class StrongboxParser:
             cell.fill = styles['dark_blue_fill']
             cell.alignment = styles['center_alignment']
         
-        # Mapping Categories sheet
+        # Create Mapping Categories sheet
         mapping_sheet = workbook.create_sheet('Mapping Categories')
         mapping_sheet.append(['Content for Mapping Categories'])
 
@@ -675,12 +674,12 @@ class StrongboxParser:
         try:
             workbook, styles = self._create_excel_workbook()
             
-            # Create other sheets first
-            self._create_other_sheets(workbook, styles)
-            
-            # Create main data sheets
+            # Create main data sheets first (in desired order)
             tb_sheet = self._create_trial_balance_sheet(workbook, trial_balance, styles)
             je_sheet = self._create_journal_entries_sheet(workbook, journal_entries, styles)
+            
+            # Create other sheets after main data sheets
+            self._create_other_sheets(workbook, styles)
             
             # Save with openpyxl
             workbook.save(output_file)
