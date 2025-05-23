@@ -375,7 +375,11 @@ class StrongboxParser:
         for account_type, count in account_type_counts.items():
             if account_type != '':
                 self.print_and_log(f"  {account_type}: {count} accounts")
-        self.print_and_log(f"  Unclassified: {(trial_balance['Account Type \n(see Mapping Categories tab)'] == '').sum()} accounts")
+        
+        # Fix f-string syntax error by extracting column name with backslash
+        account_type_col = 'Account Type \n(see Mapping Categories tab)'
+        unclassified_count = (trial_balance[account_type_col] == '').sum()
+        self.print_and_log(f"  Unclassified: {unclassified_count} accounts")
         
         # Debug info
         self.print_and_log("\nTrial Balance DataFrame - first few rows:")
