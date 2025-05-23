@@ -5,11 +5,13 @@ from dateutil.relativedelta import relativedelta
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
+from tkinter import scrolledtext
 import calendar
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from copy import copy
 import math
+import sys
 
 class StrongboxParser:
     def __init__(self):
@@ -23,6 +25,19 @@ class StrongboxParser:
         self.status_label = None
         self.progress_bar = None
         self.output_filename = None
+        self.console_output = None  # Will hold the text widget for console output
+
+    def print_and_log(self, message):
+        """Print to console and also log to GUI if available"""
+        print(message)  # Still print to console
+        if self.console_output:
+            try:
+                self.console_output.insert(tk.END, message + "\n")
+                self.console_output.see(tk.END)  # Auto-scroll to bottom
+                if self.root:
+                    self.root.update()  # Update GUI
+            except:
+                pass  # Ignore errors if GUI is not available
 
     def update_status(self, message, progress=None):
         """Update the status message and progress bar"""
@@ -40,7 +55,7 @@ class StrongboxParser:
     def determine_date_range(self):
         """Automatically determine date range from TB tab"""
         self.update_status("Determining date range from source file...", 40)
-        print("\nDetermining date range automatically from TB tab...")
+        self.print_and_log("\nDetermining date range automatically from TB tab...")
         
         # Get TB date range
         date_row = pd.read_excel(self.source_file, sheet_name='TB', header=None, nrows=1, skiprows=3)
@@ -65,7 +80,7 @@ class StrongboxParser:
                         date = pd.to_datetime(value)
                         date_columns[date] = col_idx
             except Exception as e:
-                print(f"Error processing date at column {col_idx}: {str(e)}")
+                self.print_and_log(f"Error processing date at column {col_idx}: {str(e)}")
                 continue
         
         if not date_columns:
@@ -80,7 +95,7 @@ class StrongboxParser:
         tb_earliest = tb_dates[0]
         tb_latest = tb_dates[-1]
         
-        print(f"TB date range: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}")
+        self.print_and_log(f"TB date range: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}")
         
         # Set the date range based on TB dates
         # Beginning balance date is the earliest TB date (end of month)
@@ -91,10 +106,10 @@ class StrongboxParser:
         self.end_date = tb_latest
         
         # Print the final determined date range
-        print(f"\nFinal determined date range:")
-        print(f"Beginning Balance Date: {self.begin_balance_date.strftime('%Y-%m-%d')} (TB earliest)")
-        print(f"Transaction Start Date: {self.start_date.strftime('%Y-%m-%d')} (day after beginning balance)")
-        print(f"Ending Balance Date: {self.end_date.strftime('%Y-%m-%d')} (TB latest)")
+        self.print_and_log(f"\nFinal determined date range:")
+        self.print_and_log(f"Beginning Balance Date: {self.begin_balance_date.strftime('%Y-%m-%d')} (TB earliest)")
+        self.print_and_log(f"Transaction Start Date: {self.start_date.strftime('%Y-%m-%d')} (day after beginning balance)")
+        self.print_and_log(f"Ending Balance Date: {self.end_date.strftime('%Y-%m-%d')} (TB latest)")
         
         self.update_status(f"Date range determined: {self.start_date.strftime('%m/%d/%Y')} - {self.end_date.strftime('%m/%d/%Y')}", 45)
         
@@ -109,23 +124,23 @@ class StrongboxParser:
 
     def _initialize_excel_loading(self):
         """Initialize Excel file loading and get sheet names"""
-        print("\nStarting to load source data...")
+        self.print_and_log("\nStarting to load source data...")
         self.update_status("Loading transaction data...", 40)
         
-        print("Opening Excel file...")
+        self.print_and_log("Opening Excel file...")
         excel_file_pd = pd.ExcelFile(self.source_file)
-        print(f"Found sheets: {excel_file_pd.sheet_names}")
+        self.print_and_log(f"Found sheets: {excel_file_pd.sheet_names}")
         return excel_file_pd
 
     def _try_openpyxl_fallback(self, source_file_path, sheet_to_read, use_data_only):
         """Fallback method to read Excel sheets using openpyxl when pandas fails"""
-        print(f"FALLBACK ATTEMPT with data_only={use_data_only} for sheet '{sheet_to_read}'.")
+        self.print_and_log(f"FALLBACK ATTEMPT with data_only={use_data_only} for sheet '{sheet_to_read}'.")
         fallback_workbook = None
         df_from_this_attempt = None
         try:
             fallback_workbook = openpyxl.load_workbook(source_file_path, data_only=use_data_only, read_only=True)
             if sheet_to_read not in fallback_workbook.sheetnames:
-                print(f"FALLBACK WARNING: Sheet '{sheet_to_read}' not found in workbook (data_only={use_data_only}).")
+                self.print_and_log(f"FALLBACK WARNING: Sheet '{sheet_to_read}' not found in workbook (data_only={use_data_only}).")
                 return None
 
             sheet_obj = fallback_workbook[sheet_to_read]
@@ -134,7 +149,7 @@ class StrongboxParser:
             if sheet_obj.max_row > 0:
                 header = [cell.value for cell in sheet_obj[1]]
             else:
-                print(f"FALLBACK WARNING: Sheet '{sheet_to_read}' (data_only={use_data_only}) appears empty.")
+                self.print_and_log(f"FALLBACK WARNING: Sheet '{sheet_to_read}' (data_only={use_data_only}) appears empty.")
 
             problematic_cell_count = 0
             for row_idx, row in enumerate(sheet_obj.iter_rows(min_row=2)):
@@ -144,7 +159,7 @@ class StrongboxParser:
                     try:
                         cell_value = cell.value
                     except Exception as cell_err:
-                        print(f"FALLBACK CELL ERROR (data_only={use_data_only}): Sheet '{sheet_to_read}', Row {row_idx + 2}, Col {col_idx + 1}. Error: {cell_err}. Using None.")
+                        self.print_and_log(f"FALLBACK CELL ERROR (data_only={use_data_only}): Sheet '{sheet_to_read}', Row {row_idx + 2}, Col {col_idx + 1}. Error: {cell_err}. Using None.")
                         problematic_cell_count += 1
                     if col_idx < len(header):
                         if header[col_idx] is not None: 
@@ -160,17 +175,17 @@ class StrongboxParser:
                 df_from_this_attempt = pd.DataFrame(columns=header)
             
             if problematic_cell_count > 0:
-                print(f"FALLBACK INFO (data_only={use_data_only}): Encountered {problematic_cell_count} problematic cell(s) in '{sheet_to_read}'.")
-            print(f"FALLBACK SUCCESS (data_only={use_data_only}): Successfully read and extracted data for '{sheet_to_read}'.")
+                self.print_and_log(f"FALLBACK INFO (data_only={use_data_only}): Encountered {problematic_cell_count} problematic cell(s) in '{sheet_to_read}'.")
+            self.print_and_log(f"FALLBACK SUCCESS (data_only={use_data_only}): Successfully read and extracted data for '{sheet_to_read}'.")
             return df_from_this_attempt
 
         except Exception as current_attempt_err:
-            print(f"FALLBACK ERROR (data_only={use_data_only}) for '{sheet_to_read}': {current_attempt_err} (Type: {type(current_attempt_err)})")
+            self.print_and_log(f"FALLBACK ERROR (data_only={use_data_only}) for '{sheet_to_read}': {current_attempt_err} (Type: {type(current_attempt_err)})")
             raise current_attempt_err
         finally:
             if fallback_workbook:
                 fallback_workbook.close()
-                print(f"FALLBACK CLOSED (data_only={use_data_only}): Workbook for '{sheet_to_read}'.")
+                self.print_and_log(f"FALLBACK CLOSED (data_only={use_data_only}): Workbook for '{sheet_to_read}'.")
 
     def load_source_data(self):
         """Load data from source file"""
@@ -183,11 +198,11 @@ class StrongboxParser:
 
             for sheet_name in excel_file_pd.sheet_names:
                 if sheet_name.startswith('TXN-FY'):
-                    print(f"\nAttempting to process sheet: {sheet_name}")
+                    self.print_and_log(f"\nAttempting to process sheet: {sheet_name}")
                     df = None
                     try:
                         # Attempt 1: Standard pandas read with lenient options
-                        print(f"Reading sheet data for {sheet_name} using pandas default...")
+                        self.print_and_log(f"Reading sheet data for {sheet_name} using pandas default...")
                         df = pd.read_excel(
                             excel_file_pd, # Use the pd.ExcelFile object for potentially better performance
                             sheet_name=sheet_name,
@@ -195,11 +210,11 @@ class StrongboxParser:
                             na_filter=False,
                             keep_default_na=False
                         )
-                        print(f"Successfully read sheet {sheet_name} using pandas default.")
+                        self.print_and_log(f"Successfully read sheet {sheet_name} using pandas default.")
 
                     except Exception as e:
-                        print(f"Pandas default read failed for {sheet_name}: {str(e)} (Type: {type(e)})")
-                        print(f"Attempting fallback read for {sheet_name} using openpyxl cell by cell...")
+                        self.print_and_log(f"Pandas default read failed for {sheet_name}: {str(e)} (Type: {type(e)})")
+                        self.print_and_log(f"Attempting fallback read for {sheet_name} using openpyxl cell by cell...")
                         
                         # Main fallback execution flow
                         df = None
@@ -207,25 +222,25 @@ class StrongboxParser:
                             df = self._try_openpyxl_fallback(self.source_file, sheet_name, use_data_only=True)
                         except Exception as e_data_true_attempt:
                             if "Value must be either numerical or a string containing a wildcard" in str(e_data_true_attempt):
-                                print(f"Fallback with data_only=True failed with target error. Trying data_only=False for {sheet_name}.")
+                                self.print_and_log(f"Fallback with data_only=True failed with target error. Trying data_only=False for {sheet_name}.")
                                 try:
                                     df = self._try_openpyxl_fallback(self.source_file, sheet_name, use_data_only=False)
                                 except Exception as e_data_false_attempt:
-                                    print(f"Fallback with data_only=False also failed for {sheet_name}: {str(e_data_false_attempt)}")
+                                    self.print_and_log(f"Fallback with data_only=False also failed for {sheet_name}: {str(e_data_false_attempt)}")
                                     # df remains None
                             else:
-                                print(f"Fallback with data_only=True failed with an unexpected error for {sheet_name}, not retrying with data_only=False.")
+                                self.print_and_log(f"Fallback with data_only=True failed with an unexpected error for {sheet_name}, not retrying with data_only=False.")
                                 # df remains None
                     
                     if df is None: # Check df, which would be None if all attempts failed
                         skipped_message = f"Sheet '{sheet_name}' could not be read by any method and will be SKIPPED. Please make sure to add these journal entries to the template manually."
-                        print(skipped_message)
+                        self.print_and_log(skipped_message)
                         messagebox.showwarning("Sheet Read Error", skipped_message)
                         continue # To the next sheet in the outer loop
 
                     # Common processing for df (whether from pandas or openpyxl fallback)
-                    print(f"Columns in {sheet_name}: {df.columns.tolist()}")
-                    print(f"Number of rows in {sheet_name}: {len(df)}")
+                    self.print_and_log(f"Columns in {sheet_name}: {df.columns.tolist()}")
+                    self.print_and_log(f"Number of rows in {sheet_name}: {len(df)}")
                     
                     df = self._apply_data_type_conversions(df, sheet_name)
                     
@@ -245,14 +260,14 @@ class StrongboxParser:
                     if filtered_df is not None:
                         # Add the dataframe to our source data
                         self.source_data[sheet_name] = filtered_df
-                        print(f"Successfully added filtered data from {sheet_name} to source_data.")
+                        self.print_and_log(f"Successfully added filtered data from {sheet_name} to source_data.")
                         processed_txn_sheets_count += 1
                     else:
-                        print(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
+                        self.print_and_log(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
             
             if processed_txn_sheets_count == 0 and any(s.startswith('TXN-FY') for s in excel_file_pd.sheet_names):
                 message = "CRITICAL: No transaction (TXN-FY) sheets could be successfully processed after all attempts. The output may be incomplete or empty regarding journal entries. Please make sure to add all required journal entries to the template manually. Check the console logs for details on which sheets failed."
-                print(message)
+                self.print_and_log(message)
                 messagebox.showerror("Critical Data Processing Error", message)
                 self.update_status(message, 45)
 
@@ -261,7 +276,7 @@ class StrongboxParser:
             self.source_data['TB'] = tb_data
 
         except Exception as e:
-            print(f"Error loading source data: {str(e)}")
+            self.print_and_log(f"Error loading source data: {str(e)}")
             raise
 
     def create_journal_entries(self):
@@ -269,33 +284,33 @@ class StrongboxParser:
         self.update_status("Creating journal entries...", 60)
         
         # Step 1: Get transaction sheets
-        print("\nStep 1: Getting transaction sheets")
+        self.print_and_log("\nStep 1: Getting transaction sheets")
         transaction_sheets = {k: v for k, v in self.source_data.items() if k.startswith('TXN-FY')}
-        print(f"Found sheets: {list(transaction_sheets.keys())}")
+        self.print_and_log(f"Found sheets: {list(transaction_sheets.keys())}")
         
         # Step 2: Process each sheet individually
-        print("\nStep 2: Processing individual sheets")
+        self.print_and_log("\nStep 2: Processing individual sheets")
         processed_sheets = []
         for sheet_name, df in transaction_sheets.items():
             try:
-                print(f"\nProcessing sheet: {sheet_name}")
+                self.print_and_log(f"\nProcessing sheet: {sheet_name}")
                 # Create a copy of the dataframe
                 df_copy = df.copy()
                 
                 # Convert columns to appropriate types
-                print("Converting columns...")
+                self.print_and_log("Converting columns...")
                 df_copy['Transaction Id'] = df_copy['Transaction Id'].astype(str)
                 df_copy['Memo'] = df_copy['Memo'].fillna('')
                 df_copy['Doc/Ref No'] = df_copy['Doc/Ref No'].fillna('')
                 df_copy['Account Id'] = df_copy['Account Id'].astype(str)
                 
                 # Convert numeric columns
-                print("Converting numeric columns...")
+                self.print_and_log("Converting numeric columns...")
                 df_copy['Debit'] = pd.to_numeric(df_copy['Debit'], errors='coerce').fillna(0)
                 df_copy['Credit'] = pd.to_numeric(df_copy['Credit'], errors='coerce').fillna(0)
                 
                 # Create the required columns
-                print("Creating required columns...")
+                self.print_and_log("Creating required columns...")
                 processed_df = pd.DataFrame({
                     'Journal ID': df_copy['Transaction Id'],
                     'Journal Entry Description': df_copy['Doc/Ref No'],
@@ -307,28 +322,28 @@ class StrongboxParser:
                 })
                 
                 processed_sheets.append(processed_df)
-                print(f"Successfully processed sheet: {sheet_name}")
+                self.print_and_log(f"Successfully processed sheet: {sheet_name}")
                 
             except Exception as e:
-                print(f"Error processing sheet {sheet_name}: {str(e)}")
-                print("DataFrame info:")
-                print(df.info())
-                print("\nSample data:")
-                print(df.head())
+                self.print_and_log(f"Error processing sheet {sheet_name}: {str(e)}")
+                self.print_and_log("DataFrame info:")
+                self.print_and_log(df.info())
+                self.print_and_log("\nSample data:")
+                self.print_and_log(df.head())
                 raise
         
         # Step 3: Combine all processed sheets
-        print("\nStep 3: Combining processed sheets")
+        self.print_and_log("\nStep 3: Combining processed sheets")
         try:
             if not processed_sheets:
                 raise Exception("No sheets were successfully processed")
             
             journal_entries = pd.concat(processed_sheets, ignore_index=True)
-            print("Successfully combined all sheets")
+            self.print_and_log("Successfully combined all sheets")
             return journal_entries
             
         except Exception as e:
-            print(f"Error combining sheets: {str(e)}")
+            self.print_and_log(f"Error combining sheets: {str(e)}")
             raise
 
     def create_trial_balance(self):
@@ -356,24 +371,24 @@ class StrongboxParser:
         
         # Count how many accounts were classified for each type
         account_type_counts = trial_balance['Account Type \n(see Mapping Categories tab)'].value_counts()
-        print("\nAccount Type classification summary:")
+        self.print_and_log("\nAccount Type classification summary:")
         for account_type, count in account_type_counts.items():
             if account_type != '':
-                print(f"  {account_type}: {count} accounts")
-        print(f"  Unclassified: {(trial_balance['Account Type \n(see Mapping Categories tab)'] == '').sum()} accounts")
+                self.print_and_log(f"  {account_type}: {count} accounts")
+        self.print_and_log(f"  Unclassified: {(trial_balance['Account Type \n(see Mapping Categories tab)'] == '').sum()} accounts")
         
         # Debug info
-        print("\nTrial Balance DataFrame - first few rows:")
-        print(f"Column names: {trial_balance.columns.tolist()}")
-        print("First 5 rows:")
-        print(trial_balance.head(5))
-        print(f"Total rows in trial balance: {len(trial_balance)}")
+        self.print_and_log("\nTrial Balance DataFrame - first few rows:")
+        self.print_and_log(f"Column names: {trial_balance.columns.tolist()}")
+        self.print_and_log("First 5 rows:")
+        self.print_and_log(trial_balance.head(5))
+        self.print_and_log(f"Total rows in trial balance: {len(trial_balance)}")
         
         # Calculate sum of beginning and ending balances
         begin_sum = trial_balance['Beginning Balance \n(Prior Period Balance)'].sum()
         end_sum = trial_balance['Ending Balance'].sum()
-        print(f"Sum of Beginning Balances: {begin_sum}")
-        print(f"Sum of Ending Balances: {end_sum}")
+        self.print_and_log(f"Sum of Beginning Balances: {begin_sum}")
+        self.print_and_log(f"Sum of Ending Balances: {end_sum}")
         
         # Only remove rows that are definitely headers (contain exactly "Account ID")
         headers_to_remove = []
@@ -381,7 +396,7 @@ class StrongboxParser:
             account_id = str(row['Account ID']).lower() if pd.notna(row['Account ID']) else ""
             if account_id == "account id" or account_id == "account":
                 headers_to_remove.append(idx)
-                print(f"Removing header row: {row['Account ID']}")
+                self.print_and_log(f"Removing header row: {row['Account ID']}")
         
         if headers_to_remove:
             trial_balance = trial_balance.drop(headers_to_remove)
@@ -413,7 +428,7 @@ class StrongboxParser:
         journal_entries = self.create_journal_entries()
         
         # Add accounts from journal entries that are missing from trial balance
-        print("\nChecking for accounts in journal entries that are missing from trial balance...")
+        self.print_and_log("\nChecking for accounts in journal entries that are missing from trial balance...")
         self.update_status("Adding missing accounts to trial balance...", 87)
         
         # Get all account IDs in trial balance
@@ -433,7 +448,7 @@ class StrongboxParser:
         missing_accounts = []
         for account_id, account_name in je_accounts.items():
             if account_id not in tb_account_ids and account_id.strip() != '':
-                print(f"Found missing account in journal entries: {account_id} - {account_name}")
+                self.print_and_log(f"Found missing account in journal entries: {account_id} - {account_name}")
                 
                 # Get Financial Statement Classification if available
                 fin_statement_class = ''
@@ -462,7 +477,7 @@ class StrongboxParser:
         if missing_accounts:
             missing_df = pd.DataFrame(missing_accounts)
             trial_balance = pd.concat([trial_balance, missing_df], ignore_index=True)
-            print(f"Added {len(missing_accounts)} missing accounts to trial balance")
+            self.print_and_log(f"Added {len(missing_accounts)} missing accounts to trial balance")
         
         return trial_balance, journal_entries
 
@@ -505,7 +520,7 @@ class StrongboxParser:
                 except:
                     return "DATA_ERROR"
 
-        print("Ultra-cleaning all data...")
+        self.print_and_log("Ultra-cleaning all data...")
         
         # Clean trial balance
         for col in trial_balance.columns:
@@ -519,7 +534,7 @@ class StrongboxParser:
 
     def _create_excel_workbook(self):
         """Create Excel workbook with basic styling setup"""
-        print("Creating Excel workbook with openpyxl...")
+        self.print_and_log("Creating Excel workbook with openpyxl...")
         workbook = openpyxl.Workbook()
         
         # Define styles
@@ -612,7 +627,7 @@ class StrongboxParser:
 
     def _handle_excel_creation_error(self, e, output_file, trial_balance, journal_entries):
         """Handle Excel creation errors with CSV fallback"""
-        print(f"openpyxl failed: {e}")
+        self.print_and_log(f"openpyxl failed: {e}")
         
         # Fallback to CSV files
         csv_dir = os.path.dirname(output_file)
@@ -625,9 +640,9 @@ class StrongboxParser:
         trial_balance.to_csv(tb_csv, index=False, encoding='utf-8')
         journal_entries.to_csv(je_csv, index=False, encoding='utf-8')
         
-        print(f"Created CSV files instead:")
-        print(f"Trial Balance: {tb_csv}")
-        print(f"Journal Entries: {je_csv}")
+        self.print_and_log(f"Created CSV files instead:")
+        self.print_and_log(f"Trial Balance: {tb_csv}")
+        self.print_and_log(f"Journal Entries: {je_csv}")
             
         # Try to create a minimal Excel file
         try:
@@ -669,7 +684,7 @@ class StrongboxParser:
             
             # Save with openpyxl
             workbook.save(output_file)
-            print("File created successfully with openpyxl, aggressive data cleaning, and styling")
+            self.print_and_log("File created successfully with openpyxl, aggressive data cleaning, and styling")
             
         except Exception as e:
             self._handle_excel_creation_error(e, output_file, trial_balance, journal_entries)
@@ -701,7 +716,7 @@ class StrongboxParser:
             # Create main window
             self.root = tk.Tk()
             self.root.title("Strongbox Parser")
-            self.root.geometry("600x400")
+            self.root.geometry("900x700")  # Made wider and taller to accommodate console output
 
             # Create main frame
             main_frame = ttk.Frame(self.root, padding="20")
@@ -710,10 +725,6 @@ class StrongboxParser:
             # Create title label
             title_label = ttk.Label(main_frame, text="Strongbox Parser", font=("Helvetica", 16, "bold"))
             title_label.pack(pady=20)
-
-            # Create description
-            description = ttk.Label(main_frame, text="This tool converts Strongbox Excel files to Audit Sight format.", wraplength=500)
-            description.pack(pady=10)
 
             # Create source file selection button
             source_button = ttk.Button(main_frame, text="Select Source File", command=self.select_source_file)
@@ -726,6 +737,24 @@ class StrongboxParser:
             # Create progress bar
             self.progress_bar = ttk.Progressbar(main_frame, length=400, mode='determinate')
             self.progress_bar.pack(pady=10)
+
+            # Create console output section
+            console_frame = ttk.LabelFrame(main_frame, text="Console Output", padding="10")
+            console_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
+
+            # Create scrolled text widget for console output
+            self.console_output = scrolledtext.ScrolledText(
+                console_frame, 
+                height=20, 
+                width=80,
+                font=("Consolas", 9),
+                state=tk.NORMAL,
+                wrap=tk.WORD
+            )
+            self.console_output.pack(fill=tk.BOTH, expand=True)
+
+            # Add initial message to console
+            self.print_and_log("Strongbox Parser initialized. Ready to process files.")
 
             # Start the main event loop
             self.root.mainloop()
@@ -828,29 +857,29 @@ class StrongboxParser:
                 sheet.append(row_data)
             
             workbook.save(output_file)
-            print(f"Test file created: {output_file}")
+            self.print_and_log(f"Test file created: {output_file}")
             return output_file
         except Exception as e:
-            print(f"Error creating test file: {str(e)}")
+            self.print_and_log(f"Error creating test file: {str(e)}")
             return None
 
     def _apply_data_type_conversions(self, df, sheet_name):
         """Apply data type conversions to DataFrame columns"""
-        print(f"Converting data types for {sheet_name}...")
+        self.print_and_log(f"Converting data types for {sheet_name}...")
         
         # Convert string columns
         for col in ['Transaction Id', 'Account Id', 'Memo', 'Doc/Ref No']:
             if col in df.columns:
                 df[col] = df[col].astype(str)
             else:
-                print(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
+                self.print_and_log(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
         
         # Convert numeric columns
         for col in ['Debit', 'Credit']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             else:
-                print(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
+                self.print_and_log(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
         
         return df
 
@@ -858,14 +887,14 @@ class StrongboxParser:
         """Process and validate date columns in the DataFrame"""
         # Check if both Transaction Date and Fiscal Month columns exist
         if 'Transaction Date' not in df.columns:
-            print(f"WARNING: 'Transaction Date' column NOT FOUND in sheet {sheet_name}. Cannot filter by date.")
-            print(f"Skipping sheet {sheet_name} due to missing 'Transaction Date' column.")
+            self.print_and_log(f"WARNING: 'Transaction Date' column NOT FOUND in sheet {sheet_name}. Cannot filter by date.")
+            self.print_and_log(f"Skipping sheet {sheet_name} due to missing 'Transaction Date' column.")
             return None
             
         # Process the Transaction Date and Fiscal Month columns
-        print(f"INFO: 'Transaction Date' column found in {sheet_name}.")
-        print(f"Sample raw 'Transaction Date' values in {sheet_name} before pd.to_datetime:")
-        print(df['Transaction Date'].head(10) if len(df) > 0 else "Sheet is empty or has no dates")
+        self.print_and_log(f"INFO: 'Transaction Date' column found in {sheet_name}.")
+        self.print_and_log(f"Sample raw 'Transaction Date' values in {sheet_name} before pd.to_datetime:")
+        self.print_and_log(df['Transaction Date'].head(10) if len(df) > 0 else "Sheet is empty or has no dates")
         
         # Convert Transaction Date to datetime
         df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], errors='coerce')
@@ -874,20 +903,20 @@ class StrongboxParser:
         has_fiscal_month = 'Fiscal Month' in df.columns
         
         if has_fiscal_month:
-            print(f"INFO: 'Fiscal Month' column found in {sheet_name}.")
-            print(f"Sample raw 'Fiscal Month' values in {sheet_name} before pd.to_datetime:")
-            print(df['Fiscal Month'].head(10) if len(df) > 0 else "Sheet is empty or has no fiscal months")
+            self.print_and_log(f"INFO: 'Fiscal Month' column found in {sheet_name}.")
+            self.print_and_log(f"Sample raw 'Fiscal Month' values in {sheet_name} before pd.to_datetime:")
+            self.print_and_log(df['Fiscal Month'].head(10) if len(df) > 0 else "Sheet is empty or has no fiscal months")
             
             # Convert Fiscal Month to datetime for comparison
             df['Fiscal Month'] = pd.to_datetime(df['Fiscal Month'], errors='coerce')
             
             # Count NaT values in Fiscal Month
             fiscal_nat_count = df['Fiscal Month'].isnull().sum()
-            print(f"INFO: Found {fiscal_nat_count} NaT values in 'Fiscal Month' for {sheet_name} after conversion.")
+            self.print_and_log(f"INFO: Found {fiscal_nat_count} NaT values in 'Fiscal Month' for {sheet_name} after conversion.")
         
         # Count NaT values in Transaction Date
         transaction_nat_count = df['Transaction Date'].isnull().sum()
-        print(f"INFO: Found {transaction_nat_count} NaT values in 'Transaction Date' for {sheet_name} after conversion.")
+        self.print_and_log(f"INFO: Found {transaction_nat_count} NaT values in 'Transaction Date' for {sheet_name} after conversion.")
         
         # Filter out rows where date conversion failed (NaT) for Transaction Date
         df = df[pd.notna(df['Transaction Date'])]
@@ -895,13 +924,13 @@ class StrongboxParser:
             # Keep rows only where Fiscal Month is valid
             df = df[pd.notna(df['Fiscal Month'])]
         
-        print(f"INFO: Rows in {sheet_name} after filtering NaT dates: {len(df)}")
+        self.print_and_log(f"INFO: Rows in {sheet_name} after filtering NaT dates: {len(df)}")
         return df, has_fiscal_month
 
     def _apply_date_range_filtering(self, df, sheet_name, has_fiscal_month):
         """Apply date range filtering and adjust transaction dates if needed"""
         if len(df) == 0:
-            print(f"INFO: No valid dates found in {sheet_name} after NaT filtering. Sheet will not be in final output.")
+            self.print_and_log(f"INFO: No valid dates found in {sheet_name} after NaT filtering. Sheet will not be in final output.")
             return None
         
         # Check if the sheet has any rows in our date range
@@ -910,24 +939,24 @@ class StrongboxParser:
             # Filter based on Fiscal Month for date range eligibility
             fiscal_month_mask = (df['Fiscal Month'] >= self.start_date) & (df['Fiscal Month'] <= self.end_date)
             df_in_range = df[fiscal_month_mask].copy()
-            print(f"INFO: Rows in {sheet_name} with Fiscal Month in date range [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_in_range)}")
+            self.print_and_log(f"INFO: Rows in {sheet_name} with Fiscal Month in date range [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_in_range)}")
             
             if len(df_in_range) > 0:
                 df_in_range = self._adjust_transaction_dates(df_in_range, sheet_name)
                 return df_in_range
             else:
-                print(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
+                self.print_and_log(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
                 return None
         else:
             # If no Fiscal Month, fall back to Transaction Date filtering
             transaction_date_mask = (df['Transaction Date'] >= self.start_date) & (df['Transaction Date'] <= self.end_date)
             df_filtered = df[transaction_date_mask]
-            print(f"INFO: Rows in {sheet_name} after applying date range to Transaction Date [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_filtered)}")
+            self.print_and_log(f"INFO: Rows in {sheet_name} after applying date range to Transaction Date [{self.start_date.strftime('%Y-%m-%d')} - {self.end_date.strftime('%Y-%m-%d')}]: {len(df_filtered)}")
             
             if len(df_filtered) > 0:
                 return df_filtered
             else:
-                print(f"INFO: No data from {sheet_name} within the specified date range based on Transaction Date. Sheet will not be in final output.")
+                self.print_and_log(f"INFO: No data from {sheet_name} within the specified date range based on Transaction Date. Sheet will not be in final output.")
                 return None
 
     def _adjust_transaction_dates(self, df_in_range, sheet_name):
@@ -950,17 +979,17 @@ class StrongboxParser:
                 mismatched_dates += 1
         
         if mismatched_dates > 0:
-            print(f"INFO: Adjusted {mismatched_dates} Transaction Dates to match their Fiscal Month in {sheet_name}")
+            self.print_and_log(f"INFO: Adjusted {mismatched_dates} Transaction Dates to match their Fiscal Month in {sheet_name}")
             if len(adjusted_dates) > 0 and len(adjusted_dates) <= 10:
-                print("Sample of adjusted dates (idx, original_date, new_date):")
+                self.print_and_log("Sample of adjusted dates (idx, original_date, new_date):")
                 for adj in adjusted_dates[:10]:
-                    print(f"  Row {adj[0]}: {adj[1].strftime('%Y-%m-%d')} -> {adj[2].strftime('%Y-%m-%d')}")
+                    self.print_and_log(f"  Row {adj[0]}: {adj[1].strftime('%Y-%m-%d')} -> {adj[2].strftime('%Y-%m-%d')}")
         
         return df_in_range
 
     def _load_trial_balance_data(self):
         """Load trial balance data from TB sheet"""
-        print("\nLoading trial balance data...")
+        self.print_and_log("\nLoading trial balance data...")
         self.update_status("Loading trial balance data...", 50)
         
         # Get the date_columns that were determined in determine_date_range
@@ -980,7 +1009,7 @@ class StrongboxParser:
         # If no TB date is on or before our begin_balance_date, use the earliest TB date
         if closest_begin_date is None:
             closest_begin_date = available_tb_dates[0]
-            print(f"WARNING: No TB date found on or before calculated begin balance date {self.begin_balance_date.strftime('%Y-%m-%d')}, using earliest TB date {closest_begin_date.strftime('%Y-%m-%d')}")
+            self.print_and_log(f"WARNING: No TB date found on or before calculated begin balance date {self.begin_balance_date.strftime('%Y-%m-%d')}, using earliest TB date {closest_begin_date.strftime('%Y-%m-%d')}")
         
         # Find closest ending date (on or after our end_date)
         closest_end_date = None
@@ -993,44 +1022,44 @@ class StrongboxParser:
         # If no TB date is on or after our end_date, use the latest TB date
         if closest_end_date is None:
             closest_end_date = available_tb_dates[-1]
-            print(f"WARNING: No TB date found on or after calculated end date {self.end_date.strftime('%Y-%m-%d')}, using latest TB date {closest_end_date.strftime('%Y-%m-%d')}")
+            self.print_and_log(f"WARNING: No TB date found on or after calculated end date {self.end_date.strftime('%Y-%m-%d')}, using latest TB date {closest_end_date.strftime('%Y-%m-%d')}")
         
         # Use the beginning and ending dates already identified
         begin_date = self.begin_balance_date
         
-        print(f"\nTarget dates:")
-        print(f"Begin date: {begin_date}")
-        print(f"End date: {self.end_date}")
-        print(f"Begin balance date (exact): {closest_begin_date}")
-        print(f"End balance date (exact): {closest_end_date}")
+        self.print_and_log(f"\nTarget dates:")
+        self.print_and_log(f"Begin date: {begin_date}")
+        self.print_and_log(f"End date: {self.end_date}")
+        self.print_and_log(f"Begin balance date (exact): {closest_begin_date}")
+        self.print_and_log(f"End balance date (exact): {closest_end_date}")
         
         return self._extract_trial_balance_data(date_columns, closest_begin_date, closest_end_date)
 
     def _extract_trial_balance_data(self, date_columns, closest_begin_date, closest_end_date):
         """Extract data from the TB sheet using openpyxl"""
         try:
-            print("Opening workbook for trial balance data...")
+            self.print_and_log("Opening workbook for trial balance data...")
             self.update_status("Opening workbook for trial balance...", 52)
             wb = openpyxl.load_workbook(self.source_file, data_only=True, read_only=True)
-            print("Workbook opened successfully")
+            self.print_and_log("Workbook opened successfully")
             
-            print("Accessing TB sheet...")
+            self.print_and_log("Accessing TB sheet...")
             self.update_status("Accessing TB sheet...", 54)
             tb_sheet = wb['TB']
-            print(f"TB sheet accessed. Sheet has {tb_sheet.max_row} rows and {tb_sheet.max_column} columns")
+            self.print_and_log(f"TB sheet accessed. Sheet has {tb_sheet.max_row} rows and {tb_sheet.max_column} columns")
             
             # Find Financial Statement Classification Path column
-            print("Finding Financial Statement Classification column...")
+            self.print_and_log("Finding Financial Statement Classification column...")
             self.update_status("Finding classification column...", 56)
             fin_statement_col = self._find_financial_classification_column(tb_sheet)
             
             # Print column indices for debugging
-            print(f"\nColumn indices:")
-            print(f"Begin date column index: {date_columns[closest_begin_date]}")
-            print(f"End date column index: {date_columns[closest_end_date]}")
-            print(f"Financial Statement Classification column index: {fin_statement_col}")
+            self.print_and_log(f"\nColumn indices:")
+            self.print_and_log(f"Begin date column index: {date_columns[closest_begin_date]}")
+            self.print_and_log(f"End date column index: {date_columns[closest_end_date]}")
+            self.print_and_log(f"Financial Statement Classification column index: {fin_statement_col}")
             
-            print("Starting to extract data from TB sheet...")
+            self.print_and_log("Starting to extract data from TB sheet...")
             self.update_status("Extracting trial balance data...", 58)
             
             data = []
@@ -1044,7 +1073,7 @@ class StrongboxParser:
                 
                 # Update progress every 100 rows
                 if rows_processed % 100 == 0:
-                    print(f"Processed {rows_processed} rows...")
+                    self.print_and_log(f"Processed {rows_processed} rows...")
                     progress = 58 + (rows_processed / max_row_to_process) * 10  # 58-68%
                     self.update_status(f"Processing TB row {rows_processed}...", progress)
                 
@@ -1055,7 +1084,7 @@ class StrongboxParser:
                         # Only skip rows with exact header matches, not all rows containing "account"
                         if account_id.lower() == "account id" or account_id.lower() == "account":
                             if rows_processed <= 20:  # Only print for first 20 rows to avoid spam
-                                print(f"Skipping header row {row_idx} with account_id: {account_id}")
+                                self.print_and_log(f"Skipping header row {row_idx} with account_id: {account_id}")
                             continue
                             
                         account_name = tb_sheet.cell(row=row_idx, column=6).value
@@ -1067,7 +1096,7 @@ class StrongboxParser:
                         
                         # Debug output for Financial Statement Classification for the first few rows
                         if row_idx < 12:
-                            print(f"Row {row_idx}, Account: {account_id}, Financial Statement Classification (Column {fin_statement_col}): {fin_statement_class}")
+                            self.print_and_log(f"Row {row_idx}, Account: {account_id}, Financial Statement Classification (Column {fin_statement_col}): {fin_statement_class}")
                         
                         # Handle different types appropriately
                         if fin_statement_class is None:
@@ -1094,40 +1123,40 @@ class StrongboxParser:
                         })
                 except Exception as e:
                     if rows_processed <= 20:  # Only print errors for first 20 rows to avoid spam
-                        print(f"Error processing TB sheet row {row_idx}: {str(e)}. Skipping row.")
+                        self.print_and_log(f"Error processing TB sheet row {row_idx}: {str(e)}. Skipping row.")
                     continue
             
-            print(f"Completed processing {rows_processed} rows from TB sheet")
-            print(f"Extracted {len(data)} valid account records")
+            self.print_and_log(f"Completed processing {rows_processed} rows from TB sheet")
+            self.print_and_log(f"Extracted {len(data)} valid account records")
             self.update_status("Converting TB data to DataFrame...", 68)
             
             # Convert to DataFrame
             tb_data = pd.DataFrame(data)
-            print("\nFirst few rows of TB data:")
-            print(tb_data.head())
+            self.print_and_log("\nFirst few rows of TB data:")
+            self.print_and_log(tb_data.head())
             
             return tb_data
             
         except Exception as e:
-            print(f"Error in _extract_trial_balance_data: {str(e)}")
+            self.print_and_log(f"Error in _extract_trial_balance_data: {str(e)}")
             raise
         finally:
             # Close the workbook if it exists
             try:
                 if 'wb' in locals():
                     wb.close()
-                    print("Workbook closed")
+                    self.print_and_log("Workbook closed")
             except:
                 pass
 
     def _find_financial_classification_column(self, tb_sheet):
         """Find the Financial Statement Classification column in the TB sheet"""
-        print("Searching for Financial Statement Classification column...")
+        self.print_and_log("Searching for Financial Statement Classification column...")
         fin_statement_col = None
         
         # Search more efficiently - check fewer rows and columns first
         for row_idx in range(1, 6):  # Check first 5 rows for headers
-            print(f"Checking row {row_idx} for headers...")
+            self.print_and_log(f"Checking row {row_idx} for headers...")
             for col_idx in range(1, 15):  # Check first 14 columns (reduced from 25)
                 try:
                     cell_value = tb_sheet.cell(row=row_idx, column=col_idx).value
@@ -1135,7 +1164,7 @@ class StrongboxParser:
                         cell_text = str(cell_value).lower()
                         if 'financial statement classification' in cell_text or 'fin statement classification' in cell_text:
                             fin_statement_col = col_idx
-                            print(f"Found Financial Statement Classification header in row {row_idx}, column {col_idx}: {cell_value}")
+                            self.print_and_log(f"Found Financial Statement Classification header in row {row_idx}, column {col_idx}: {cell_value}")
                             return fin_statement_col
                 except Exception as e:
                     # Silently continue if there's an error reading a cell
@@ -1146,7 +1175,7 @@ class StrongboxParser:
         if not fin_statement_col:
             # Default to column C (3) as specified
             fin_statement_col = 3
-            print(f"No Financial Statement Classification header found, using default column C (3)")
+            self.print_and_log(f"No Financial Statement Classification header found, using default column C (3)")
         
         return fin_statement_col
 
