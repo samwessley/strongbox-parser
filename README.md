@@ -14,8 +14,8 @@ A Python tool for converting financial data from Strongbox Excel files into an A
 ## Requirements
 
 - Python 3.6+
-- pandas
-- openpyxl
+  - pandas
+  - openpyxl
 - xlwings
 - tkinter (included with standard Python installation)
 
