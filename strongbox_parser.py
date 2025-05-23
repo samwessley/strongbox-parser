@@ -7,7 +7,9 @@ from tkinter import filedialog, messagebox
 from tkinter import ttk
 import calendar
 import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
 from copy import copy
+import math
 
 class StrongboxParser:
     def __init__(self):
@@ -36,11 +38,11 @@ class StrongboxParser:
         pass
 
     def determine_date_range(self):
-        """Automatically determine date range from TB tab"""
+        """Automatically determine date range from TB tab and validate against journal entry dates"""
         self.update_status("Determining date range from source file...", 40)
         print("\nDetermining date range automatically from TB tab...")
         
-        # Read row 4 to get the dates
+        # Step 1: Get TB date range
         date_row = pd.read_excel(self.source_file, sheet_name='TB', header=None, nrows=1, skiprows=3)
         date_row = date_row.iloc[0]
         
@@ -70,20 +72,97 @@ class StrongboxParser:
             raise Exception("No valid dates found in row 4 of the TB sheet. Please ensure dates are in a standard format.")
         
         # Find the earliest and latest dates in the TB sheet
-        all_dates = sorted(date_columns.keys())
+        tb_dates = sorted(date_columns.keys())
         
-        if len(all_dates) < 2:
+        if len(tb_dates) < 2:
             raise Exception("Not enough dates found in TB sheet. Need at least two dates for beginning and ending balances.")
         
-        # Use the earliest date as beginning balance date
-        self.begin_balance_date = all_dates[0]
-        # Use the latest date as ending balance date
-        self.end_date = all_dates[-1]
-        # Start date for transactions is one day after begin balance date
-        self.start_date = self.begin_balance_date + relativedelta(days=1)
+        tb_earliest = tb_dates[0]
+        tb_latest = tb_dates[-1]
         
-        # Print the determined date range
-        print(f"Automatically determined date range:")
+        print(f"TB date range: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}")
+        
+        # Step 2: Get journal entry fiscal month date range
+        print("\nScanning journal entry sheets for fiscal month date range...")
+        journal_earliest = None
+        journal_latest = None
+        
+        try:
+            excel_file_pd = pd.ExcelFile(self.source_file)
+            
+            for sheet_name in excel_file_pd.sheet_names:
+                if sheet_name.startswith('TXN-FY'):
+                    print(f"Checking fiscal month dates in {sheet_name}...")
+                    try:
+                        # Read the sheet to get fiscal month data
+                        df = pd.read_excel(
+                            excel_file_pd,
+                            sheet_name=sheet_name,
+                            engine='openpyxl',
+                            na_filter=False,
+                            keep_default_na=False
+                        )
+                        
+                        if 'Fiscal Month' in df.columns:
+                            # Convert Fiscal Month to datetime
+                            fiscal_months = pd.to_datetime(df['Fiscal Month'], errors='coerce')
+                            fiscal_months = fiscal_months.dropna()  # Remove NaT values
+                            
+                            if not fiscal_months.empty:
+                                sheet_earliest = fiscal_months.min()
+                                sheet_latest = fiscal_months.max()
+                                
+                                print(f"  {sheet_name} fiscal month range: {sheet_earliest.strftime('%Y-%m-%d')} to {sheet_latest.strftime('%Y-%m-%d')}")
+                                
+                                # Update overall journal date range
+                                if journal_earliest is None or sheet_earliest < journal_earliest:
+                                    journal_earliest = sheet_earliest
+                                if journal_latest is None or sheet_latest > journal_latest:
+                                    journal_latest = sheet_latest
+                            else:
+                                print(f"  {sheet_name} has no valid fiscal month dates")
+                        else:
+                            print(f"  {sheet_name} does not have a Fiscal Month column")
+                            
+                    except Exception as e:
+                        print(f"  Error reading {sheet_name}: {str(e)}")
+                        continue
+            
+            if journal_earliest is None or journal_latest is None:
+                print("WARNING: Could not determine journal entry date range, using TB dates only")
+                journal_earliest = tb_earliest
+                journal_latest = tb_latest
+            else:
+                print(f"Journal entry fiscal month range: {journal_earliest.strftime('%Y-%m-%d')} to {journal_latest.strftime('%Y-%m-%d')}")
+            
+        except Exception as e:
+            print(f"Error scanning journal entries: {str(e)}")
+            print("WARNING: Using TB dates only")
+            journal_earliest = tb_earliest
+            journal_latest = tb_latest
+        
+        # Step 3: Find the overlapping range that both datasets completely span
+        overlap_start = max(tb_earliest, journal_earliest)
+        overlap_end = min(tb_latest, journal_latest)
+        
+        print(f"\nOverlapping range calculation:")
+        print(f"  TB range: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}")
+        print(f"  Journal range: {journal_earliest.strftime('%Y-%m-%d')} to {journal_latest.strftime('%Y-%m-%d')}")
+        print(f"  Overlap: {overlap_start.strftime('%Y-%m-%d')} to {overlap_end.strftime('%Y-%m-%d')}")
+        
+        if overlap_start > overlap_end:
+            raise Exception(f"No overlapping date range found between TB dates and journal entries.\nTB: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}\nJournal: {journal_earliest.strftime('%Y-%m-%d')} to {journal_latest.strftime('%Y-%m-%d')}")
+        
+        # Step 4: Set the final date range based on the overlap
+        # Beginning balance date is one day before the overlap start
+        self.begin_balance_date = overlap_start - relativedelta(days=1)
+        # Transaction start date is the overlap start
+        self.start_date = overlap_start
+        # Ending date is the overlap end
+        self.end_date = overlap_end
+        
+        # Print the final determined date range
+        print(f"\nFinal determined date range:")
         print(f"Beginning Balance Date: {self.begin_balance_date.strftime('%Y-%m-%d')}")
         print(f"Transaction Start Date: {self.start_date.strftime('%Y-%m-%d')}")
         print(f"Ending Balance Date: {self.end_date.strftime('%Y-%m-%d')}")
@@ -337,10 +416,37 @@ class StrongboxParser:
             # Get the date_columns that were determined in determine_date_range
             date_columns = self.date_columns
             
+            # Find the closest TB dates to our calculated range
+            available_tb_dates = sorted(date_columns.keys())
+            
+            # Find closest beginning date (on or before our begin_balance_date)
+            closest_begin_date = None
+            for tb_date in available_tb_dates:
+                if tb_date <= self.begin_balance_date:
+                    closest_begin_date = tb_date
+                else:
+                    break
+            
+            # If no TB date is on or before our begin_balance_date, use the earliest TB date
+            if closest_begin_date is None:
+                closest_begin_date = available_tb_dates[0]
+                print(f"WARNING: No TB date found on or before calculated begin balance date {self.begin_balance_date.strftime('%Y-%m-%d')}, using earliest TB date {closest_begin_date.strftime('%Y-%m-%d')}")
+            
+            # Find closest ending date (on or after our end_date)
+            closest_end_date = None
+            for tb_date in reversed(available_tb_dates):
+                if tb_date >= self.end_date:
+                    closest_end_date = tb_date
+                else:
+                    break
+            
+            # If no TB date is on or after our end_date, use the latest TB date
+            if closest_end_date is None:
+                closest_end_date = available_tb_dates[-1]
+                print(f"WARNING: No TB date found on or after calculated end date {self.end_date.strftime('%Y-%m-%d')}, using latest TB date {closest_end_date.strftime('%Y-%m-%d')}")
+            
             # Use the beginning and ending dates already identified
             begin_date = self.begin_balance_date
-            closest_begin_date = self.begin_balance_date  # Using exact date, not closest
-            closest_end_date = self.end_date  # Using exact date, not closest
             
             print(f"\nTarget dates:")
             print(f"Begin date: {begin_date}")
@@ -479,10 +585,10 @@ class StrongboxParser:
                     'Journal ID': df_copy['Transaction Id'],
                     'Journal Entry Description': df_copy['Doc/Ref No'],
                     'Posted Date': df_copy['Transaction Date'],
-                    'Account': df_copy['Account Id'],
+                    'Account ID': df_copy['Account Id'],
                     'Journal Line Description': df_copy['Memo'],
-                    'Debit': df_copy['Debit'],
-                    'Credit': df_copy['Credit']
+                    'Debit Amount': df_copy['Debit'],
+                    'Credit Amount': df_copy['Credit']
                 })
                 
                 processed_sheets.append(processed_df)
@@ -582,43 +688,6 @@ class StrongboxParser:
             f"{self.output_filename}_{self.start_date.strftime('%Y%m%d')}_{self.end_date.strftime('%Y%m%d')}.xlsx"
         )
         
-        # Create a new workbook from scratch with no external links
-        workbook = openpyxl.Workbook()
-        
-        # Define the tab order
-        tab_order = [
-            'Instructions', 
-            'Data Validation Tests', 
-            'Notes', 
-            'Comparative Trial Balances',
-            'Journal Entries & Lines', 
-            'Banking Accts', 
-            'Banking Txns', 
-            'Mapping Categories'
-        ]
-        
-        # Remove default sheet
-        if 'Sheet' in workbook.sheetnames:
-            default_sheet = workbook['Sheet']
-            workbook.remove(default_sheet)
-        
-        # Create each sheet in the desired order
-        for sheet_name in tab_order:
-            workbook.create_sheet(sheet_name)
-        
-        # Set tab colors
-        tab_colors = {
-            'Instructions': '002060',
-            'Data Validation Tests': '002060',
-            'Notes': '002060',
-            'Mapping Categories': '0070C0'
-        }
-        
-        for sheet_name, color_code in tab_colors.items():
-            if sheet_name in workbook.sheetnames:
-                sheet = workbook[sheet_name]
-                sheet.sheet_properties.tabColor = color_code
-        
         # Load the trial balance data
         self.update_status("Creating trial balance...", 85)
         trial_balance = self.create_trial_balance()
@@ -636,8 +705,7 @@ class StrongboxParser:
         
         # Get all unique accounts from journal entries with their account names
         je_accounts = {}
-        if 'Account' in journal_entries.columns and len(journal_entries) > 0:
-            # Get unique account ID and account name pairs from transaction data
+        if 'Account ID' in journal_entries.columns and len(journal_entries) > 0:
             for sheet_name, df in self.source_data.items():
                 if sheet_name.startswith('TXN-FY') and 'Account Id' in df.columns and 'Account Name' in df.columns:
                     for _, row in df.iterrows():
@@ -661,7 +729,6 @@ class StrongboxParser:
                         matching_rows = df[df['Account Id'] == account_id]
                         if not matching_rows.empty and not pd.isna(matching_rows['Financial Statement Classification'].iloc[0]):
                             fin_statement_class = matching_rows['Financial Statement Classification'].iloc[0]
-                            # Determine account type using the shared method
                             account_type = self.determine_account_type(fin_statement_class)
                             break
                 
@@ -680,126 +747,281 @@ class StrongboxParser:
             missing_df = pd.DataFrame(missing_accounts)
             trial_balance = pd.concat([trial_balance, missing_df], ignore_index=True)
             print(f"Added {len(missing_accounts)} missing accounts to trial balance")
-        
-        # Process the TB sheet
-        tb_sheet = workbook['Comparative Trial Balances']
-        
-        # Add required/optional labels to row 1
-        for col in range(1, 6):  # Columns A-E
-            tb_sheet.cell(row=1, column=col, value='Required')
-        for col in range(6, 8):  # Columns F-G
-            tb_sheet.cell(row=1, column=col, value='Optional')
-        
-        # Add column headers to row 2
-        for col_idx, column_name in enumerate(trial_balance.columns, 1):
-            tb_sheet.cell(row=2, column=col_idx, value=column_name)
-        
-        # Add data starting at row 3
-        for row_idx, row in enumerate(trial_balance.iterrows(), 3):
-            for col_idx, col_name in enumerate(trial_balance.columns, 1):
-                tb_sheet.cell(row=row_idx, column=col_idx, value=row[1][col_name])
-        
-        # Set column widths for Comparative Trial Balances
-        column_widths = {
-            'A': 148/7,  # Approximate conversion from pixels to Excel units
-            'B': 294/7,
-            'C': 154/7,
-            'D': 154/7,
-            'E': 294/7,
-            'F': 302/7,
-            'G': 162/7
-        }
-        
-        for col_letter, width in column_widths.items():
-            tb_sheet.column_dimensions[col_letter].width = width
-        
-        # Process the Journal Entries & Lines sheet
-        je_sheet = workbook['Journal Entries & Lines']
-        
-        # Add required/optional labels to row 1
-        required_cols = [1, 3, 4, 6, 7]  # A, C, D, F, G
-        optional_cols = [2, 5]  # B, E
-        for col in required_cols:
-            je_sheet.cell(row=1, column=col, value='Required')
-        for col in optional_cols:
-            je_sheet.cell(row=1, column=col, value='Optional')
-        
-        # Add column headers to row 2
-        for col_idx, column_name in enumerate(journal_entries.columns, 1):
-            je_sheet.cell(row=2, column=col_idx, value=column_name)
-        
-        # Add data starting at row 3
-        for row_idx, row in enumerate(journal_entries.iterrows(), 3):
-            for col_idx, col_name in enumerate(journal_entries.columns, 1):
-                je_sheet.cell(row=row_idx, column=col_idx, value=row[1][col_name])
-        
-        # Copy templates for the other tabs - SAFELY with no external links
-        self.update_status("Copying templates for other tabs...", 95)
-        template_wb = openpyxl.load_workbook('Audit Sight Template.xlsx', data_only=True, keep_links=False)
-        
-        # Copy content from template without formulas or links
-        for sheet_name in tab_order:
-            if sheet_name not in ['Comparative Trial Balances', 'Journal Entries & Lines']:
-                if sheet_name in template_wb.sheetnames:
-                    template_sheet = template_wb[sheet_name]
-                    output_sheet = workbook[sheet_name]
+
+        # EXTREME data cleaning - replace everything potentially problematic
+        def ultra_clean_value(value):
+            """Ultra-aggressive cleaning to remove any potential Excel corruption"""
+            if pd.isna(value):
+                return ""
+            elif isinstance(value, (int, float)):
+                if math.isinf(value) or math.isnan(value) or abs(value) > 1e15:
+                    return 0.0
+                return float(value)
+            elif isinstance(value, pd.Timestamp):
+                try:
+                    # Return the datetime object itself, not a string
+                    # Excel will handle the formatting
+                    return value.to_pydatetime()
+                except:
+                    return ""
+            else:
+                try:
+                    # Convert to string and encode/decode to clean any encoding issues
+                    str_val = str(value).encode('ascii', errors='ignore').decode('ascii')
                     
-                    # Copy content but not formulas, links or connections
-                    for row in template_sheet.rows:
-                        for cell in row:
-                            # Get the cell value only, ignoring formulas
-                            cell_value = cell.value
-                            
-                            # Avoid copying hyperlinks or external references
-                            if isinstance(cell_value, str) and (cell_value.startswith('http') or cell_value.startswith('=')):
-                                if cell_value.startswith('='):
-                                    # Replace formula with its value or empty string
-                                    cell_value = ""
-                            
-                            # Set the cell value directly without links
-                            output_cell = output_sheet.cell(row=cell.row, column=cell.column, value=cell_value)
-                            
-                            # Copy only safe styling elements
-                            if cell.has_style:
-                                output_cell.font = copy(cell.font)
-                                output_cell.border = copy(cell.border)
-                                output_cell.fill = copy(cell.fill)
-                                output_cell.number_format = cell.number_format
-                                output_cell.alignment = copy(cell.alignment)
+                    # Remove any remaining problematic characters - be extremely aggressive
+                    import re
+                    # Keep only letters, numbers, spaces, basic punctuation
+                    cleaned = re.sub(r'[^\w\s\-\.\,\(\)\:\;\$\%\@\#\!\?\/\\]', ' ', str_val)
+                    
+                    # Replace multiple spaces with single space
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                    
+                    # Limit length
+                    if len(cleaned) > 1000:  # Much shorter limit
+                        cleaned = cleaned[:1000]
+                    
+                    return cleaned
+                except:
+                    return "DATA_ERROR"
+
+        print("Ultra-cleaning all data...")
         
-        # Apply safe header formatting
-        self.update_status("Applying formatting...", 98)
-        if 'Comparative Trial Balances' in template_wb.sheetnames:
-            template_tb = template_wb['Comparative Trial Balances']
-            for col in range(1, 8):  # Columns A-G
-                if col <= len(trial_balance.columns):
-                    template_cell = template_tb.cell(row=2, column=col)
-                    tb_cell = tb_sheet.cell(row=2, column=col)
-                    if template_cell.has_style:
-                        tb_cell.font = copy(template_cell.font)
-                        tb_cell.fill = copy(template_cell.fill)
+        # Clean trial balance
+        for col in trial_balance.columns:
+            trial_balance[col] = trial_balance[col].apply(ultra_clean_value)
         
-        if 'Journal Entries & Lines' in template_wb.sheetnames:
-            template_je = template_wb['Journal Entries & Lines']
-            for col in range(1, 8):  # Columns A-G
-                if col <= len(journal_entries.columns):
-                    template_cell = template_je.cell(row=2, column=col)
-                    je_cell = je_sheet.cell(row=2, column=col)
-                    if template_cell.has_style:
-                        je_cell.font = copy(template_cell.font)
-                        je_cell.fill = copy(template_cell.fill)
-        
-        # Ensure no external links exist
-        if hasattr(workbook, 'external_links'):
-            workbook.external_links.clear()
+        # Clean journal entries  
+        for col in journal_entries.columns:
+            journal_entries[col] = journal_entries[col].apply(ultra_clean_value)
+
+        # Use openpyxl with aggressive error handling
+        try:
+            print("Creating Excel workbook with openpyxl...")
+            workbook = openpyxl.Workbook()
             
-        # Turn off external data connections
-        workbook.properties.externalReferences = False
+            # Define styles
+            header_font = Font(name='Arial', size=12, bold=True, color='FFFFFF')
+            blue_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
+            gray_fill = PatternFill(start_color='999999', end_color='999999', fill_type='solid')
+            dark_blue_fill = PatternFill(start_color='002060', end_color='002060', fill_type='solid')
+            center_alignment = Alignment(horizontal='center', vertical='center')
+            
+            # Remove default sheet
+            if 'Sheet' in workbook.sheetnames:
+                workbook.remove(workbook['Sheet'])
+            
+            # Create all sheets in the correct order first
+            # Instructions sheet
+            instructions_sheet = workbook.create_sheet('Instructions')
+            instructions_sheet.append(['Content for Instructions'])
+            
+            # Data Validation Tests sheet
+            validation_sheet = workbook.create_sheet('Data Validation Tests')
+            validation_sheet.append(['Content for Data Validation Tests'])
+            
+            # Notes sheet
+            notes_sheet = workbook.create_sheet('Notes')
+            notes_sheet.append(['Content for Notes'])
+            
+            # Create trial balance sheet
+            tb_sheet = workbook.create_sheet('Comparative Trial Balances')
+            
+            # Set column widths for trial balance (converting px to Excel units)
+            tb_sheet.column_dimensions['A'].width = 14.3  # 100px
+            tb_sheet.column_dimensions['B'].width = 34.3  # 240px
+            tb_sheet.column_dimensions['C'].width = 15.7  # 110px
+            tb_sheet.column_dimensions['D'].width = 15.7  # 110px
+            tb_sheet.column_dimensions['E'].width = 15.7  # 110px
+            tb_sheet.column_dimensions['F'].width = 34.3  # 240px
+            tb_sheet.column_dimensions['G'].width = 34.3  # 240px
+            
+            # Write headers
+            tb_sheet.append(['Required'] * 5 + ['Optional'] * 2)
+            tb_sheet.append(list(trial_balance.columns))
+            
+            # Style row 1 headers (Required/Optional)
+            for col in range(1, 6):  # Columns A-E
+                cell = tb_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = blue_fill
+                cell.alignment = center_alignment
+            
+            for col in range(6, 8):  # Columns F-G
+                cell = tb_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = gray_fill
+                cell.alignment = center_alignment
+            
+            # Style row 2 headers (column names) and set row height
+            tb_sheet.row_dimensions[2].height = 25  # 33px ≈ 25 points
+            for col in range(1, 8):  # All columns
+                cell = tb_sheet.cell(row=2, column=col)
+                cell.font = header_font
+                cell.fill = dark_blue_fill
+                cell.alignment = center_alignment
+            
+            # Write trial balance data with error handling
+            for _, row in trial_balance.iterrows():
+                row_values = []
+                for col in trial_balance.columns:
+                    value = row[col]
+                    try:
+                        # Double-check the value is clean
+                        if isinstance(value, str) and len(value) > 1000:
+                            value = value[:1000]
+                        row_values.append(value)
+                    except:
+                        row_values.append("ERROR")
+                tb_sheet.append(row_values)
+            
+            # Create journal entries sheet
+            je_sheet = workbook.create_sheet('Journal Entries & Lines')
+            
+            # Set column widths for journal entries (converting px to Excel units)
+            je_sheet.column_dimensions['A'].width = 14.3  # 100px
+            je_sheet.column_dimensions['B'].width = 48.6  # 340px
+            je_sheet.column_dimensions['C'].width = 15.7  # 110px
+            je_sheet.column_dimensions['D'].width = 20.0  # 140px
+            je_sheet.column_dimensions['E'].width = 35.7  # 250px
+            je_sheet.column_dimensions['F'].width = 15.7  # 110px
+            je_sheet.column_dimensions['G'].width = 15.7  # 110px
+            
+            # Write headers
+            je_sheet.append(['Required', 'Optional', 'Required', 'Required', 'Optional', 'Required', 'Required'])
+            je_sheet.append(list(journal_entries.columns))
+            
+            # Style row 1 headers (Required/Optional)
+            required_cols = [1, 3, 4, 6, 7]  # Columns A, C, D, F, G
+            optional_cols = [2, 5]  # Columns B, E
+            
+            for col in required_cols:
+                cell = je_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = blue_fill
+                cell.alignment = center_alignment
+            
+            for col in optional_cols:
+                cell = je_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = gray_fill
+                cell.alignment = center_alignment
+            
+            # Style row 2 headers (column names)
+            for col in range(1, 8):  # All columns
+                cell = je_sheet.cell(row=2, column=col)
+                cell.font = header_font
+                cell.fill = dark_blue_fill
+                cell.alignment = center_alignment
+            
+            # Write journal entries data with error handling
+            for _, row in journal_entries.iterrows():
+                row_values = []
+                for col in journal_entries.columns:
+                    value = row[col]
+                    try:
+                        # Double-check the value is clean
+                        if isinstance(value, str) and len(value) > 1000:
+                            value = value[:1000]
+                        row_values.append(value)
+                    except:
+                        row_values.append("ERROR")
+                je_sheet.append(row_values)
+            
+            # Apply date formatting to column C (Posted Date) in Journal Entries & Lines
+            for row_num in range(3, je_sheet.max_row + 1):  # Start from row 3 (after headers)
+                cell = je_sheet.cell(row=row_num, column=3)
+                cell.number_format = 'M/D/YYYY'
+            
+            # Banking Accts sheet with specific formatting
+            banking_accts_sheet = workbook.create_sheet('Banking Accts')
+            
+            # Add headers for Banking Accts
+            banking_accts_sheet.append(['Required', 'Required', 'Optional', 'Optional'])
+            banking_accts_sheet.append(['Account Number', 'Account Name', 'Institution', 'Currency'])
+            
+            # Style row 1 headers for Banking Accts
+            for col in range(1, 3):  # Columns A-B (Required)
+                cell = banking_accts_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = blue_fill
+                cell.alignment = center_alignment
+            
+            for col in range(3, 5):  # Columns C-D (Optional)
+                cell = banking_accts_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = gray_fill
+                cell.alignment = center_alignment
+            
+            # Style row 2 headers for Banking Accts
+            for col in range(1, 5):  # All columns A-D
+                cell = banking_accts_sheet.cell(row=2, column=col)
+                cell.font = header_font
+                cell.fill = dark_blue_fill
+                cell.alignment = center_alignment
+            
+            # Banking Txn sheet with specific formatting
+            banking_txn_sheet = workbook.create_sheet('Banking Txn')
+            
+            # Add headers for Banking Txn
+            banking_txn_sheet.append(['Required', 'Required', 'Required', 'Required'])
+            banking_txn_sheet.append(['Posted Date', 'Description', 'Amount', 'Account Number'])
+            
+            # Style row 1 headers for Banking Txn (all Required)
+            for col in range(1, 5):  # Columns A-D (all Required)
+                cell = banking_txn_sheet.cell(row=1, column=col)
+                cell.font = header_font
+                cell.fill = blue_fill
+                cell.alignment = center_alignment
+            
+            # Style row 2 headers for Banking Txn
+            for col in range(1, 5):  # All columns A-D
+                cell = banking_txn_sheet.cell(row=2, column=col)
+                cell.font = header_font
+                cell.fill = dark_blue_fill
+                cell.alignment = center_alignment
+            
+            # Mapping Categories sheet
+            mapping_sheet = workbook.create_sheet('Mapping Categories')
+            mapping_sheet.append(['Content for Mapping Categories'])
+            
+            # Save with openpyxl
+            workbook.save(output_file)
+            print("File created successfully with openpyxl, aggressive data cleaning, and styling")
+            
+        except Exception as e:
+            print(f"openpyxl failed: {e}")
+            
+            # Fallback to CSV files
+            csv_dir = os.path.dirname(output_file)
+            csv_base = os.path.splitext(os.path.basename(output_file))[0]
+            
+            tb_csv = os.path.join(csv_dir, f"{csv_base}_TrialBalance.csv")
+            je_csv = os.path.join(csv_dir, f"{csv_base}_JournalEntries.csv")
+            
+            # Write as CSV files
+            trial_balance.to_csv(tb_csv, index=False, encoding='utf-8')
+            journal_entries.to_csv(je_csv, index=False, encoding='utf-8')
+            
+            print(f"Created CSV files instead:")
+            print(f"Trial Balance: {tb_csv}")
+            print(f"Journal Entries: {je_csv}")
+            
+            # Try to create a minimal Excel file
+            try:
+                workbook = openpyxl.Workbook()
+                sheet = workbook.active
+                sheet.title = "READ_ME"
+                sheet['A1'] = "Excel file creation failed due to data corruption issues."
+                sheet['A2'] = "Please use the CSV files created instead:"
+                sheet['A3'] = f"Trial Balance: {os.path.basename(tb_csv)}"
+                sheet['A4'] = f"Journal Entries: {os.path.basename(je_csv)}"
+                workbook.save(output_file)
+                workbook.close()
+            except:
+                pass
         
-        # Save the workbook with properties to avoid external content warnings
         self.update_status("Saving workbook...", 99)
-        workbook.save(output_file)
-        
         return output_file
 
     def process_data(self):
@@ -927,6 +1149,37 @@ class StrongboxParser:
             return 'Expense'
         else:
             return ''
+
+    def create_test_file(self):
+        """Create a minimal test Excel file to diagnose corruption issues"""
+        output_file = os.path.join(
+            self.output_dir,
+            f"TEST_{self.output_filename}_{self.start_date.strftime('%Y%m%d')}_{self.end_date.strftime('%Y%m%d')}.xlsx"
+        )
+        
+        # Create minimal test data
+        test_data = [
+            ['Account ID', 'Account Name', 'Beginning Balance', 'Ending Balance'],
+            ['100', 'Cash', 1000.00, 1500.00],
+            ['200', 'Accounts Receivable', 5000.00, 4500.00],
+            ['300', 'Inventory', 2000.00, 2200.00]
+        ]
+        
+        # Try the most basic Excel creation possible
+        try:
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = 'Test Data'
+            
+            for row_data in test_data:
+                sheet.append(row_data)
+            
+            workbook.save(output_file)
+            print(f"Test file created: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error creating test file: {str(e)}")
+            return None
 
 if __name__ == "__main__":
     parser = StrongboxParser()
