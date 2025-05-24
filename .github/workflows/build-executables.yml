@@ -52,13 +52,13 @@ jobs:
       run: |
         echo "Checking dist folder..."
         dir dist
-        if exist "dist\StrongboxParser.exe" (
+        if (Test-Path "dist\StrongboxParser.exe") {
           echo "Build successful!"
           dir "dist\StrongboxParser.exe"
-        ) else (
+        } else {
           echo "Build failed - executable not found"
           exit 1
-        )
+        }
     
     - name: Upload Windows executable
       uses: actions/upload-artifact@v4
