@@ -2,46 +2,62 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 *.pyc
-venv/
-.env
-
-# PyInstaller build artifacts
-build/
-dist/
-
-# macOS
-.DS_Store
-
-# Excel files
-*.xlsx
-*.xls
-
-# CSV files
-*.csv
-
-# IDE
-.vscode/
-.idea/
-
-# Testing
-test_files/
-output/
 
 # Virtual Environment
+venv/
 env/
 ENV/
+.env
+.venv
+.env.*
 
-# IDE files
+# Build and Distribution
+build/
+dist/
+*.spec
+*.egg-info/
+*.egg
+
+# IDE and Editor files
+.vscode/
+.idea/
 *.swp
 *.swo
+*.swn
+.project
+.pydevproject
+.settings/
 
-# Excel temp files
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Excel and Data files
+*.xlsx
+*.xls
+*.csv
 ~$*.xlsx
 ~$*.xls
+*.xlsm
+*.xlsb
 
-# OS specific
-Thumbs.db
+# Testing and Output
+test_files/
+output/
+test_output/
+logs/
+*.log
 
-# Local config
-.env.* 
+# Local configuration
+.env.*
+config.local.ini 
