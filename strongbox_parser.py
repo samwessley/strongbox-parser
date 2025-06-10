@@ -274,6 +274,30 @@ class StrongboxParser:
             # Load trial balance data
             tb_data = self._load_trial_balance_data()
             self.source_data['TB'] = tb_data
+            
+            # Load TB-DATA sheet for balance information
+            self.print_and_log("\nLoading TB-DATA sheet...")
+            self.update_status("Loading TB-DATA sheet...", 75)
+            try:
+                tb_data_df = pd.read_excel(
+                    excel_file_pd,
+                    sheet_name='TB-DATA',
+                    engine='openpyxl',
+                    na_filter=False,
+                    keep_default_na=False
+                )
+                self.source_data['TB-DATA'] = tb_data_df
+                self.print_and_log(f"Successfully loaded TB-DATA sheet with {len(tb_data_df)} rows")
+                self.print_and_log(f"TB-DATA columns: {tb_data_df.columns.tolist()}")
+                
+                # Show first few rows for debugging
+                self.print_and_log("\nFirst few rows of TB-DATA:")
+                self.print_and_log(tb_data_df.head())
+                
+            except Exception as e:
+                self.print_and_log(f"Warning: Could not load TB-DATA sheet: {str(e)}")
+                self.print_and_log("Will use default balance values (0) if TB-DATA is not available")
+                self.source_data['TB-DATA'] = None
 
         except Exception as e:
             self.print_and_log(f"Error loading source data: {str(e)}")
@@ -355,16 +379,42 @@ class StrongboxParser:
         tb_data = tb_data[~((tb_data['Account Id'].str.lower() == "account id") | 
                            (tb_data['Account Id'].str.lower() == "account"))]
         
-        # Create new dataframe with required columns
+        # Create new dataframe with required columns, but we'll update balances from TB-DATA
         trial_balance = pd.DataFrame({
             'Account ID': tb_data['Account Id'],
             'Account Name': tb_data['Account Name'],
-            'Beginning Balance \n(Prior Period Balance)': tb_data['Beginning Balance'],
-            'Ending Balance': tb_data['Ending Balance'],
+            'Beginning Balance \n(Prior Period Balance)': 0.0,  # Will be populated from TB-DATA
+            'Ending Balance': 0.0,  # Will be populated from TB-DATA
             'Account Type \n(see Mapping Categories tab)': '',
             'Account Mapping \n(see Mapping Categories tab)': '',
             'Account Description': tb_data['Financial Statement Classification']
         })
+        
+        # Update balances from TB-DATA sheet
+        self.print_and_log("\nUpdating balances from TB-DATA sheet...")
+        self.update_status("Updating balances from TB-DATA...", 72)
+        
+        updated_accounts = 0
+        total_begin_from_tbdata = 0.0
+        total_end_from_tbdata = 0.0
+        
+        for idx, row in trial_balance.iterrows():
+            account_id = row['Account ID']
+            begin_balance, end_balance = self._extract_balances_from_tb_data(
+                account_id, self.begin_balance_date, self.end_date
+            )
+            
+            trial_balance.at[idx, 'Beginning Balance \n(Prior Period Balance)'] = begin_balance
+            trial_balance.at[idx, 'Ending Balance'] = end_balance
+            
+            total_begin_from_tbdata += begin_balance
+            total_end_from_tbdata += end_balance
+            
+            if begin_balance != 0.0 or end_balance != 0.0:
+                updated_accounts += 1
+        
+        self.print_and_log(f"Updated balances for {updated_accounts} accounts from TB-DATA")
+        self.print_and_log(f"Total balances extracted from TB-DATA: Begin={total_begin_from_tbdata}, End={total_end_from_tbdata}")
         
         # Apply the class method to populate the Account Type column
         trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
@@ -393,6 +443,19 @@ class StrongboxParser:
         end_sum = trial_balance['Ending Balance'].sum()
         self.print_and_log(f"Sum of Beginning Balances: {begin_sum}")
         self.print_and_log(f"Sum of Ending Balances: {end_sum}")
+        
+        # Show a few sample balances to verify they're being set correctly
+        self.print_and_log("\nSample balance values from trial balance:")
+        for idx in range(min(5, len(trial_balance))):
+            account_id = trial_balance.at[idx, 'Account ID']
+            begin_bal = trial_balance.at[idx, 'Beginning Balance \n(Prior Period Balance)']
+            end_bal = trial_balance.at[idx, 'Ending Balance']
+            self.print_and_log(f"Account {account_id}: Begin={begin_bal}, End={end_bal}")
+        
+        # Check data types
+        self.print_and_log(f"\nData types:")
+        self.print_and_log(f"Beginning Balance column type: {trial_balance['Beginning Balance \n(Prior Period Balance)'].dtype}")
+        self.print_and_log(f"Ending Balance column type: {trial_balance['Ending Balance'].dtype}")
         
         # Only remove rows that are definitely headers (contain exactly "Account ID")
         headers_to_remove = []
@@ -1298,6 +1361,98 @@ class StrongboxParser:
             cell.number_format = 'M/D/YYYY'
         
         return je_sheet
+
+    def _extract_balances_from_tb_data(self, account_id, begin_date, end_date):
+        """Extract beginning and ending balances from TB-DATA sheet for a specific account"""
+        if 'TB-DATA' not in self.source_data or self.source_data['TB-DATA'] is None:
+            return 0.0, 0.0
+        
+        tb_data = self.source_data['TB-DATA']
+        
+        # Debug: Show the first few rows and column structure for the first account only
+        if not hasattr(self, '_tb_data_debug_shown'):
+            self.print_and_log("\nDEBUG: TB-DATA structure for balance extraction:")
+            self.print_and_log(f"TB-DATA columns: {tb_data.columns.tolist()}")
+            self.print_and_log("First 3 rows of TB-DATA:")
+            for i in range(min(3, len(tb_data))):
+                row_data = []
+                for j in range(min(8, len(tb_data.columns))):  # Show first 8 columns
+                    row_data.append(f"Col{j}: {tb_data.iloc[i, j]}")
+                self.print_and_log(f"Row {i}: {', '.join(row_data)}")
+            self._tb_data_debug_shown = True
+        
+        # Find the account in TB-DATA
+        # Try different possible account ID column positions
+        account_data = None
+        account_col_found = None
+        
+        # Check columns B through D (indices 1-3) for Account ID
+        for col_idx in [1, 2, 3]:
+            try:
+                if col_idx < len(tb_data.columns):
+                    matching_rows = tb_data[tb_data.iloc[:, col_idx].astype(str) == str(account_id)]
+                    if not matching_rows.empty:
+                        account_data = matching_rows
+                        account_col_found = col_idx
+                        break
+            except Exception:
+                continue
+        
+        if account_data is None or account_data.empty:
+            # Account not found in TB-DATA
+            return 0.0, 0.0
+        
+        begin_balance = 0.0
+        end_balance = 0.0
+        matches_found = 0
+        
+        # Find balances matching our target dates
+        for _, row in account_data.iterrows():
+            try:
+                # Column A (index 0) should contain fiscal month
+                fiscal_month_val = row.iloc[0]
+                if pd.isna(fiscal_month_val):
+                    continue
+                
+                # Try to parse the fiscal month date
+                fiscal_month = pd.to_datetime(fiscal_month_val)
+                
+                # Column E (index 4) is Starting Account Balance  
+                starting_balance_val = row.iloc[4] if len(row) > 4 else 0.0
+                starting_balance = 0.0
+                if pd.notna(starting_balance_val):
+                    try:
+                        starting_balance = float(starting_balance_val)
+                    except (ValueError, TypeError):
+                        starting_balance = 0.0
+                
+                # Column G (index 6) is Ending Account Balance
+                ending_balance_val = row.iloc[6] if len(row) > 6 else 0.0
+                ending_balance = 0.0
+                if pd.notna(ending_balance_val):
+                    try:
+                        ending_balance = float(ending_balance_val)
+                    except (ValueError, TypeError):
+                        ending_balance = 0.0
+                
+                # Check if fiscal month matches our target dates
+                if fiscal_month.date() == begin_date.date():
+                    begin_balance = ending_balance  # Changed from starting_balance to ending_balance
+                    matches_found += 1
+                    
+                if fiscal_month.date() == end_date.date():
+                    end_balance = ending_balance
+                    matches_found += 1
+                    
+            except Exception as e:
+                continue
+        
+        # Debug for first few accounts
+        if matches_found > 0 and not hasattr(self, f'_balance_debug_{account_id}'):
+            self.print_and_log(f"Found balances for account {account_id}: Begin={begin_balance}, End={end_balance}")
+            setattr(self, f'_balance_debug_{account_id}', True)
+        
+        return begin_balance, end_balance
 
 if __name__ == "__main__":
     parser = StrongboxParser()
