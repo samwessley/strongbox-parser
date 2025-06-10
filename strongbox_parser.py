@@ -1315,12 +1315,12 @@ class StrongboxParser:
         je_sheet.column_dimensions['G'].width = 15.7  # 110px
         
         # Write headers
-        je_sheet.append(['Required', 'Optional', 'Required', 'Required', 'Optional', 'Required', 'Required'])
+        je_sheet.append(['Required', 'Optional', 'Required', 'Required', 'Required', 'Required', 'Required'])
         je_sheet.append(list(journal_entries.columns))
         
         # Style row 1 headers (Required/Optional)
-        required_cols = [1, 3, 4, 6, 7]  # Columns A, C, D, F, G
-        optional_cols = [2, 5]  # Columns B, E
+        required_cols = [1, 3, 4, 5, 6, 7]  # Columns A, C, D, E, F, G
+        optional_cols = [2]  # Column B
         
         for col in required_cols:
             cell = je_sheet.cell(row=1, column=col)
