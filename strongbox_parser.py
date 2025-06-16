@@ -132,6 +132,48 @@ class StrongboxParser:
         self.print_and_log(f"Found sheets: {excel_file_pd.sheet_names}")
         return excel_file_pd
 
+    def _validate_required_tabs(self, excel_file_pd):
+        """Validate that all required tabs are present in the Strongbox file"""
+        self.print_and_log("\nValidating required tabs...")
+        self.update_status("Validating required tabs...", 35)
+        
+        available_sheets = excel_file_pd.sheet_names
+        missing_tabs = []
+        
+        # Check for TB sheet
+        if 'TB' not in available_sheets:
+            missing_tabs.append('TB')
+        
+        # Check for TB-DATA sheet
+        if 'TB-DATA' not in available_sheets:
+            missing_tabs.append('TB-DATA')
+        
+        # Check for at least one TXN-FY sheet
+        txn_sheets = [sheet for sheet in available_sheets if sheet.startswith('TXN-FY')]
+        if not txn_sheets:
+            missing_tabs.append('TXN-FY* (at least one transaction sheet starting with TXN-FY)')
+        
+        # If any required tabs are missing, raise an error
+        if missing_tabs:
+            if len(missing_tabs) == 1:
+                error_message = f"Unable to parse this Strongbox file. Missing required tab: {missing_tabs[0]}"
+            else:
+                tabs_list = ', '.join(missing_tabs[:-1]) + f' and {missing_tabs[-1]}'
+                error_message = f"Unable to parse this Strongbox file. Missing required tabs: {tabs_list}"
+            
+            self.print_and_log(f"ERROR: {error_message}")
+            self.print_and_log(f"Available sheets in file: {available_sheets}")
+            self.update_status("Validation failed - missing required tabs", 0)
+            raise Exception(error_message)
+        
+        # Log success
+        self.print_and_log(f"✅ All required tabs found:")
+        self.print_and_log(f"  • TB sheet: Found")
+        self.print_and_log(f"  • TB-DATA sheet: Found") 
+        self.print_and_log(f"  • Transaction sheets: Found {len(txn_sheets)} sheets ({', '.join(txn_sheets)})")
+        
+        return True
+
     def _try_openpyxl_fallback(self, source_file_path, sheet_to_read, use_data_only):
         """Fallback method to read Excel sheets using openpyxl when pandas fails"""
         self.print_and_log(f"FALLBACK ATTEMPT with data_only={use_data_only} for sheet '{sheet_to_read}'.")
@@ -192,6 +234,9 @@ class StrongboxParser:
         try:
             # Load transaction data
             excel_file_pd = self._initialize_excel_loading()
+            
+            # Validate that all required tabs are present
+            self._validate_required_tabs(excel_file_pd)
             
             processed_txn_sheets_count = 0
             # workbook_openpyxl = None # No longer needed as a shared instance
