@@ -296,6 +296,17 @@ class StrongboxParser:
                             'Credit': float(row[col_indices['Credit']].value or 0)
                         }
 
+                        # Extract Transaction Type and Relationship Name if they exist
+                        if 'Transaction Type' in headers:
+                            values['Transaction Type'] = str(row[headers.index('Transaction Type')].value or '')
+                        else:
+                            values['Transaction Type'] = ''
+                            
+                        if 'Relationship Name' in headers:
+                            values['Relationship Name'] = str(row[headers.index('Relationship Name')].value or '')
+                        else:
+                            values['Relationship Name'] = ''
+
                         # Check for non-USD transactions
                         if currency_col_idx is not None:
                             transaction_currency = str(row[currency_col_idx].value or '').strip()
