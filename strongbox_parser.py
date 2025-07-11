@@ -12,6 +12,9 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from copy import copy
 import math
 import sys
+import re
+import warnings
+warnings.filterwarnings('ignore')
 
 class StrongboxParser:
     def __init__(self):
@@ -19,6 +22,7 @@ class StrongboxParser:
         self.output_dir = None
         self.start_date = None
         self.end_date = None
+        self.begin_balance_date = None
         self.source_data = {}
         self.template_data = {}
         self.root = None
@@ -26,6 +30,9 @@ class StrongboxParser:
         self.progress_bar = None
         self.output_filename = None
         self.console_output = None  # Will hold the text widget for console output
+        self.date_columns = {}
+        self.non_usd_transactions = []  # Store non-USD transactions
+        self.non_usd_headers = ['Journal ID', 'Type', 'Journal Entry Description', 'Posted Date', 'Account ID', 'Journal Line Description', 'Name', 'Debit Amount', 'Credit Amount', 'Transaction Currency']  # Headers for non-USD transactions tab
 
     def print_and_log(self, message):
         """Print to console and also log to GUI if available"""
@@ -53,67 +60,48 @@ class StrongboxParser:
         pass
 
     def determine_date_range(self):
-        """Automatically determine date range from TB tab"""
-        self.update_status("Determining date range from source file...", 40)
-        self.print_and_log("\nDetermining date range automatically from TB tab...")
-        
-        # Get TB date range
-        date_row = pd.read_excel(self.source_file, sheet_name='TB', header=None, nrows=1, skiprows=3)
-        date_row = date_row.iloc[0]
-        
-        # Convert dates to datetime
-        date_columns = {}
-        for col_idx, value in enumerate(date_row):
-            try:
-                if pd.notna(value):
-                    # Try to handle different date formats
-                    if isinstance(value, str):
-                        # Try different date formats
-                        for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%m-%d-%Y', '%d-%b-%Y', '%d/%b/%Y']:
-                            try:
-                                date = datetime.strptime(value, fmt)
-                                date_columns[date] = col_idx
-                                break
-                            except ValueError:
-                                continue
-                    else:
-                        date = pd.to_datetime(value)
-                        date_columns[date] = col_idx
-            except Exception as e:
-                self.print_and_log(f"Error processing date at column {col_idx}: {str(e)}")
-                continue
-        
-        if not date_columns:
-            raise Exception("No valid dates found in row 4 of the TB sheet. Please ensure dates are in a standard format.")
-        
-        # Find the earliest and latest dates in the TB sheet
-        tb_dates = sorted(date_columns.keys())
-        
-        if len(tb_dates) < 2:
-            raise Exception("Not enough dates found in TB sheet. Need at least two dates for beginning and ending balances.")
-        
-        tb_earliest = tb_dates[0]
-        tb_latest = tb_dates[-1]
-        
-        self.print_and_log(f"TB date range: {tb_earliest.strftime('%Y-%m-%d')} to {tb_latest.strftime('%Y-%m-%d')}")
-        
-        # Set the date range based on TB dates
-        # Beginning balance date is the earliest TB date (end of month)
-        self.begin_balance_date = tb_earliest
-        # Transaction start date is the day after the earliest TB date
-        self.start_date = tb_earliest + relativedelta(days=1)
-        # Ending date is the latest TB date (end of month)
-        self.end_date = tb_latest
-        
-        # Print the final determined date range
-        self.print_and_log(f"\nFinal determined date range:")
-        self.print_and_log(f"Beginning Balance Date: {self.begin_balance_date.strftime('%Y-%m-%d')} (TB earliest)")
-        self.print_and_log(f"Transaction Start Date: {self.start_date.strftime('%Y-%m-%d')} (day after beginning balance)")
-        self.print_and_log(f"Ending Balance Date: {self.end_date.strftime('%Y-%m-%d')} (TB latest)")
-        
-        self.update_status(f"Date range determined: {self.start_date.strftime('%m/%d/%Y')} - {self.end_date.strftime('%m/%d/%Y')}", 45)
-        
-        return date_columns
+        """Determine date range from TB sheet efficiently"""
+        self.update_status('Determining date range from TB sheet...', 10)
+
+        # Read the date row with optimized settings
+        try:
+            date_row = pd.read_excel(
+                self.source_file,
+                sheet_name='TB',
+                header=None,
+                nrows=1,
+                skiprows=3,
+                dtype_backend='pyarrow',  # Use Arrow for better performance
+                parse_dates=True  # Automatically parse dates
+            )
+            date_row = date_row.iloc[0]
+
+            # Convert all values to datetime efficiently using vectorized operations
+            dates = pd.to_datetime(date_row, errors='coerce')
+            valid_dates = dates[dates.notna()]
+
+            if valid_dates.empty:
+                raise Exception('No valid dates found in TB sheet row 4')
+            if len(valid_dates) < 2:
+                raise Exception('Need at least two dates in TB sheet')
+
+            # Create date_columns mapping
+            date_columns = {date: idx for idx, date in enumerate(dates) if pd.notna(date)}
+
+            # Set date range
+            self.begin_balance_date = valid_dates.min()
+            self.start_date = self.begin_balance_date + relativedelta(days=1)
+            self.end_date = valid_dates.max()
+            self.date_columns = date_columns
+
+            self.print_and_log(f'📅 Date range: {self.start_date.strftime("%Y-%m-%d")} to {self.end_date.strftime("%Y-%m-%d")}')
+            self.print_and_log(f'📅 Found {len(date_columns)} valid dates in TB sheet')
+
+            return date_columns
+
+        except Exception as e:
+            self.print_and_log(f'❌ Error determining date range: {str(e)}')
+            raise
 
     def get_last_day_of_month(self, date):
         """Return the last day of the month for a given date"""
@@ -230,126 +218,216 @@ class StrongboxParser:
                 self.print_and_log(f"FALLBACK CLOSED (data_only={use_data_only}): Workbook for '{sheet_to_read}'.")
 
     def load_source_data(self):
-        """Load data from source file"""
+        """Load all required data from the Excel file efficiently using openpyxl directly"""
+        self.update_status('Loading transaction data...', 20)
+
         try:
-            # Load transaction data
-            excel_file_pd = self._initialize_excel_loading()
-            
-            # Validate that all required tabs are present
-            self._validate_required_tabs(excel_file_pd)
-            
-            processed_txn_sheets_count = 0
-            # workbook_openpyxl = None # No longer needed as a shared instance
+            # Load workbook once with read-only mode and data_only for better performance
+            workbook = openpyxl.load_workbook(self.source_file, read_only=True, data_only=True)
 
-            for sheet_name in excel_file_pd.sheet_names:
-                if sheet_name.startswith('TXN-FY'):
-                    self.print_and_log(f"\nAttempting to process sheet: {sheet_name}")
-                    df = None
-                    try:
-                        # Attempt 1: Standard pandas read with lenient options
-                        self.print_and_log(f"Reading sheet data for {sheet_name} using pandas default...")
-                        df = pd.read_excel(
-                            excel_file_pd, # Use the pd.ExcelFile object for potentially better performance
-                            sheet_name=sheet_name,
-                            engine='openpyxl',
-                            na_filter=False,
-                            keep_default_na=False
-                        )
-                        self.print_and_log(f"Successfully read sheet {sheet_name} using pandas default.")
+            # Validate required tabs
+            available_sheets = workbook.sheetnames
+            txn_sheets = [s for s in available_sheets if s.startswith('TXN-FY')]
 
-                    except Exception as e:
-                        self.print_and_log(f"Pandas default read failed for {sheet_name}: {str(e)} (Type: {type(e)})")
-                        self.print_and_log(f"Attempting fallback read for {sheet_name} using openpyxl cell by cell...")
-                        
-                        # Main fallback execution flow
-                        df = None
-                        try:
-                            df = self._try_openpyxl_fallback(self.source_file, sheet_name, use_data_only=True)
-                        except Exception as e_data_true_attempt:
-                            if "Value must be either numerical or a string containing a wildcard" in str(e_data_true_attempt):
-                                self.print_and_log(f"Fallback with data_only=True failed with target error. Trying data_only=False for {sheet_name}.")
+            # Check for missing required tabs
+            missing_tabs = []
+            if 'TB' not in available_sheets:
+                missing_tabs.append('TB')
+            if 'TB-DATA' not in available_sheets:
+                missing_tabs.append('TB-DATA')
+            if not txn_sheets:
+                missing_tabs.append('TXN-FY* (at least one transaction sheet starting with TXN-FY)')
+
+            if missing_tabs:
+                if len(missing_tabs) == 1:
+                    error_message = f"Unable to parse this Strongbox file. Missing required tab: {missing_tabs[0]}"
+                else:
+                    tabs_list = ', '.join(missing_tabs[:-1]) + f' and {missing_tabs[-1]}'
+                    error_message = f"Unable to parse this Strongbox file. Missing required tabs: {tabs_list}"
+                self.print_and_log(f"❌ ERROR: {error_message}")
+                self.print_and_log(f"📋 Available sheets in file: {available_sheets}")
+                self.update_status("Validation failed - missing required tabs", 0)
+                raise Exception(error_message)
+
+            self.print_and_log("✅ All required tabs found:")
+            self.print_and_log("  • TB sheet: Found")
+            self.print_and_log("  • TB-DATA sheet: Found")
+            self.print_and_log(f"  • Transaction sheets: Found {len(txn_sheets)} sheets ({', '.join(txn_sheets)})")
+
+            # Process TXN sheets
+            for sheet_name in txn_sheets:
+                try:
+                    sheet = workbook[sheet_name]
+
+                    # Get headers from first row
+                    headers = [cell.value for cell in next(sheet.rows)]
+
+                    # Find column indices
+                    col_indices = {
+                        'Transaction Id': headers.index('Transaction Id'),
+                        'Transaction Date': headers.index('Transaction Date'),
+                        'Fiscal Month': headers.index('Fiscal Month'),
+                        'Account Id': headers.index('Account Id'),
+                        'Memo': headers.index('Memo'),
+                        'Doc/Ref No': headers.index('Doc/Ref No'),
+                        'Debit': headers.index('Debit'),
+                        'Credit': headers.index('Credit')
+                    }
+                    
+                    # Check if Transaction Currency column exists
+                    currency_col_idx = None
+                    if 'Transaction Currency' in headers:
+                        currency_col_idx = headers.index('Transaction Currency')
+
+                    # Process rows in chunks for memory efficiency
+                    data = []
+                    chunk_size = 1000
+                    chunk = []
+
+                    for row in sheet.iter_rows(min_row=2):
+                        values = {
+                            'Transaction Id': str(row[col_indices['Transaction Id']].value or ''),
+                            'Transaction Date': row[col_indices['Transaction Date']].value,
+                            'Fiscal Month': row[col_indices['Fiscal Month']].value,
+                            'Account Id': str(row[col_indices['Account Id']].value or ''),
+                            'Memo': str(row[col_indices['Memo']].value or ''),
+                            'Doc/Ref No': str(row[col_indices['Doc/Ref No']].value or ''),
+                            'Debit': float(row[col_indices['Debit']].value or 0),
+                            'Credit': float(row[col_indices['Credit']].value or 0)
+                        }
+
+                        # Check for non-USD transactions
+                        if currency_col_idx is not None:
+                            transaction_currency = str(row[currency_col_idx].value or '').strip()
+                            if transaction_currency and transaction_currency.upper() != 'USD':
+                                # Store only the relevant columns for non-USD transactions tab
+                                # Get Transaction Type and Relationship Name if they exist
+                                transaction_type = ''
+                                relationship_name = ''
+                                
+                                if 'Transaction Type' in headers:
+                                    transaction_type = str(row[headers.index('Transaction Type')].value or '')
+                                if 'Relationship Name' in headers:
+                                    relationship_name = str(row[headers.index('Relationship Name')].value or '')
+                                
+                                non_usd_data = {
+                                    'Journal ID': values['Transaction Id'],
+                                    'Type': transaction_type,
+                                    'Journal Entry Description': values['Doc/Ref No'],
+                                    'Posted Date': values['Transaction Date'],
+                                    'Account ID': values['Account Id'],
+                                    'Journal Line Description': values['Memo'],
+                                    'Name': relationship_name,
+                                    'Debit Amount': values['Debit'],
+                                    'Credit Amount': values['Credit'],
+                                    'Transaction Currency': transaction_currency
+                                }
+                                
+                                self.non_usd_transactions.append(non_usd_data)
+
+                        # Convert dates if needed
+                        for date_col in ['Transaction Date', 'Fiscal Month']:
+                            if values[date_col] and not isinstance(values[date_col], datetime):
                                 try:
-                                    df = self._try_openpyxl_fallback(self.source_file, sheet_name, use_data_only=False)
-                                except Exception as e_data_false_attempt:
-                                    self.print_and_log(f"Fallback with data_only=False also failed for {sheet_name}: {str(e_data_false_attempt)}")
-                                    # df remains None
-                            else:
-                                self.print_and_log(f"Fallback with data_only=True failed with an unexpected error for {sheet_name}, not retrying with data_only=False.")
-                                # df remains None
-                    
-                    if df is None: # Check df, which would be None if all attempts failed
-                        skipped_message = f"Sheet '{sheet_name}' could not be read by any method and will be SKIPPED. Please make sure to add these journal entries to the template manually."
-                        self.print_and_log(skipped_message)
-                        messagebox.showwarning("Sheet Read Error", skipped_message)
-                        continue # To the next sheet in the outer loop
+                                    values[date_col] = pd.to_datetime(values[date_col])
+                                except:
+                                    values[date_col] = None
 
-                    # Common processing for df (whether from pandas or openpyxl fallback)
-                    self.print_and_log(f"Columns in {sheet_name}: {df.columns.tolist()}")
-                    self.print_and_log(f"Number of rows in {sheet_name}: {len(df)}")
-                    
-                    df = self._apply_data_type_conversions(df, sheet_name)
-                    
-                    date_result = self._process_date_columns(df, sheet_name)
-                    if date_result is None:
-                        continue  # Skip this sheet if date processing failed
-                    
-                    df, has_fiscal_month = date_result
-                    fiscal_month_dates = None
-                    
-                    if has_fiscal_month:
-                        fiscal_month_dates = df['Fiscal Month'].copy()
-                        
-                    # Apply date range filtering and adjustments
-                    filtered_df = self._apply_date_range_filtering(df, sheet_name, has_fiscal_month)
-                    
-                    if filtered_df is not None:
-                        # Add the dataframe to our source data
-                        self.source_data[sheet_name] = filtered_df
-                        self.print_and_log(f"Successfully added filtered data from {sheet_name} to source_data.")
-                        processed_txn_sheets_count += 1
-                    else:
-                        self.print_and_log(f"INFO: No data from {sheet_name} within the specified date range based on Fiscal Month. Sheet will not be in final output.")
-            
-            if processed_txn_sheets_count == 0 and any(s.startswith('TXN-FY') for s in excel_file_pd.sheet_names):
-                message = "CRITICAL: No transaction (TXN-FY) sheets could be successfully processed after all attempts. The output may be incomplete or empty regarding journal entries. Please make sure to add all required journal entries to the template manually. Check the console logs for details on which sheets failed."
-                self.print_and_log(message)
-                messagebox.showerror("Critical Data Processing Error", message)
-                self.update_status(message, 45)
+                        chunk.append(values)
 
-            # Load trial balance data
-            tb_data = self._load_trial_balance_data()
-            self.source_data['TB'] = tb_data
-            
-            # Load TB-DATA sheet for balance information
+                        if len(chunk) >= chunk_size:
+                            data.extend(chunk)
+                            chunk = []
+
+                    if chunk:
+                        data.extend(chunk)
+
+                    # Create DataFrame from processed data
+                    df = pd.DataFrame(data)
+
+                    # Filter by date range if needed
+                    if self.start_date is not None and self.end_date is not None and 'Fiscal Month' in df.columns:
+                        df = df[(df['Fiscal Month'] >= self.start_date) & (df['Fiscal Month'] <= self.end_date)]
+
+                    if not df.empty:
+                        self.source_data[sheet_name] = df
+                        self.print_and_log(f'✅ {sheet_name}: {len(df)} transactions loaded')
+
+                except Exception as e:
+                    self.print_and_log(f'⚠️ Error loading {sheet_name}: {str(e)}')
+
+            # Load TB-DATA sheet
             self.print_and_log("\nLoading TB-DATA sheet...")
-            self.update_status("Loading TB-DATA sheet...", 75)
+            self.update_status("Loading TB-DATA sheet...", 25)
             try:
-                tb_data_df = pd.read_excel(
-                    excel_file_pd,
-                    sheet_name='TB-DATA',
-                    engine='openpyxl',
-                    na_filter=False,
-                    keep_default_na=False
-                )
-                self.source_data['TB-DATA'] = tb_data_df
-                self.print_and_log(f"Successfully loaded TB-DATA sheet with {len(tb_data_df)} rows")
-                self.print_and_log(f"TB-DATA columns: {tb_data_df.columns.tolist()}")
-                
-                # Show first few rows for debugging
-                self.print_and_log("\nFirst few rows of TB-DATA:")
-                self.print_and_log(tb_data_df.head())
-                
+                sheet = workbook['TB-DATA']
+                headers = [cell.value for cell in next(sheet.rows)]
+                data = []
+
+                for row in sheet.iter_rows(min_row=2):
+                    values = {header: cell.value for header, cell in zip(headers, row)}
+                    data.append(values)
+
+                self.source_data['TB-DATA'] = pd.DataFrame(data)
+                self.print_and_log(f"✅ Successfully loaded TB-DATA sheet with {len(data)} rows")
+
             except Exception as e:
-                self.print_and_log(f"Warning: Could not load TB-DATA sheet: {str(e)}")
+                self.print_and_log(f"⚠️ Warning: Could not load TB-DATA sheet: {str(e)}")
                 self.print_and_log("Will use default balance values (0) if TB-DATA is not available")
                 self.source_data['TB-DATA'] = None
 
+            workbook.close()
+            
+            # Log summary of non-USD transactions
+            if self.non_usd_transactions:
+                self.print_and_log(f"\n⚠️ Non-USD transactions found. These are printed on the 'Non-USD Transactions' tab of the output file")
+            else:
+                self.print_and_log("\n✅ All transactions are in USD")
+
+            # Load trial balance data using openpyxl
+            tb_data = self.load_trial_balance_data()
+            self.source_data['TB'] = tb_data
+
         except Exception as e:
-            self.print_and_log(f"Error loading source data: {str(e)}")
+            self.print_and_log(f"❌ Error loading Excel file: {str(e)}")
             raise
+    
+    def load_trial_balance_data(self):
+        # This method keeps the existing TB sheet loading logic
+        self.update_status('Loading trial balance data...', 40)
+
+        # Get the date_columns that were determined in determine_date_range
+        date_columns = self.date_columns
+
+        # Find the closest TB dates to our calculated range
+        available_tb_dates = sorted(date_columns.keys())
+
+        # Find closest beginning date
+        closest_begin_date = None
+        for tb_date in available_tb_dates:
+            if tb_date <= self.begin_balance_date:
+                closest_begin_date = tb_date
+            else:
+                break
+
+        if closest_begin_date is None:
+            closest_begin_date = available_tb_dates[0]
+
+        # Find closest ending date
+        closest_end_date = None
+        for tb_date in reversed(available_tb_dates):
+            if tb_date >= self.end_date:
+                closest_end_date = tb_date
+            else:
+                break
+
+        if closest_end_date is None:
+            closest_end_date = available_tb_dates[-1]
+
+        return self._extract_trial_balance_data(date_columns, closest_begin_date, closest_end_date)
 
     def create_journal_entries(self):
-        """Create Journal Entries & Lines tab"""
+        """Create Journal Entries & Lines tabs"""
         self.update_status("Creating journal entries...", 60)
         
         # Step 1: Get transaction sheets
@@ -359,7 +437,7 @@ class StrongboxParser:
         
         # Step 2: Process each sheet individually
         self.print_and_log("\nStep 2: Processing individual sheets")
-        processed_sheets = []
+        processed_sheets = {}  # Changed from list to dictionary
         for sheet_name, df in transaction_sheets.items():
             try:
                 self.print_and_log(f"\nProcessing sheet: {sheet_name}")
@@ -373,6 +451,13 @@ class StrongboxParser:
                 df_copy['Doc/Ref No'] = df_copy['Doc/Ref No'].fillna('')
                 df_copy['Account Id'] = df_copy['Account Id'].astype(str)
                 
+                # Handle optional columns
+                for col in ['Transaction Type', 'Relationship Name']:
+                    if col in df_copy.columns:
+                        df_copy[col] = df_copy[col].fillna('')
+                    else:
+                        df_copy[col] = ''
+                
                 # Convert numeric columns
                 self.print_and_log("Converting numeric columns...")
                 df_copy['Debit'] = pd.to_numeric(df_copy['Debit'], errors='coerce').fillna(0)
@@ -382,15 +467,17 @@ class StrongboxParser:
                 self.print_and_log("Creating required columns...")
                 processed_df = pd.DataFrame({
                     'Journal ID': df_copy['Transaction Id'],
+                    'Type': df_copy['Transaction Type'],
                     'Journal Entry Description': df_copy['Doc/Ref No'],
                     'Posted Date': df_copy['Transaction Date'],
                     'Account ID': df_copy['Account Id'],
                     'Journal Line Description': df_copy['Memo'],
+                    'Name': df_copy['Relationship Name'],
                     'Debit Amount': df_copy['Debit'],
                     'Credit Amount': df_copy['Credit']
                 })
                 
-                processed_sheets.append(processed_df)
+                processed_sheets[sheet_name] = processed_df  # Store in dictionary with sheet name as key
                 self.print_and_log(f"Successfully processed sheet: {sheet_name}")
                 
             except Exception as e:
@@ -401,18 +488,17 @@ class StrongboxParser:
                 self.print_and_log(df.head())
                 raise
         
-        # Step 3: Combine all processed sheets
-        self.print_and_log("\nStep 3: Combining processed sheets")
+        # Step 3: Return dictionary of processed sheets
+        self.print_and_log("\nStep 3: Finished processing sheets")
         try:
             if not processed_sheets:
                 raise Exception("No sheets were successfully processed")
             
-            journal_entries = pd.concat(processed_sheets, ignore_index=True)
-            self.print_and_log("Successfully combined all sheets")
-            return journal_entries
+            self.print_and_log(f"Successfully processed {len(processed_sheets)} sheets")
+            return processed_sheets
             
         except Exception as e:
-            self.print_and_log(f"Error combining sheets: {str(e)}")
+            self.print_and_log(f"Error processing sheets: {str(e)}")
             raise
 
     def create_trial_balance(self):
@@ -537,7 +623,7 @@ class StrongboxParser:
         
         # Process the Journal Entries & Lines
         self.update_status("Creating journal entries...", 90)
-        journal_entries = self.create_journal_entries()
+        journal_entries_dict = self.create_journal_entries()
         
         # Add accounts from journal entries that are missing from trial balance
         self.print_and_log("\nChecking for accounts in journal entries that are missing from trial balance...")
@@ -546,103 +632,71 @@ class StrongboxParser:
         # Get all account IDs in trial balance
         tb_account_ids = set(trial_balance['Account ID'].astype(str))
         
-        # Get all unique accounts from journal entries with their account names
+        # Get all unique accounts from all journal entries with their account names
         je_accounts = {}
-        if 'Account ID' in journal_entries.columns and len(journal_entries) > 0:
-            for sheet_name, df in self.source_data.items():
-                if sheet_name.startswith('TXN-FY') and 'Account Id' in df.columns and 'Account Name' in df.columns:
-                    for _, row in df.iterrows():
-                        account_id = str(row['Account Id'])
-                        account_name = str(row['Account Name']) if pd.notna(row['Account Name']) else ''
-                        je_accounts[account_id] = account_name
-        
-        # Find accounts in journal entries but not in trial balance
-        missing_accounts = []
-        for account_id, account_name in je_accounts.items():
-            if account_id not in tb_account_ids and account_id.strip() != '':
-                self.print_and_log(f"Found missing account in journal entries: {account_id} - {account_name}")
-                
-                # Get Financial Statement Classification if available
-                fin_statement_class = ''
-                account_type = ''
-                
-                # Try to find Financial Statement Classification from transaction data
-                for sheet_name, df in self.source_data.items():
-                    if sheet_name.startswith('TXN-FY') and 'Account Id' in df.columns and 'Financial Statement Classification' in df.columns:
-                        matching_rows = df[df['Account Id'] == account_id]
-                        if not matching_rows.empty and not pd.isna(matching_rows['Financial Statement Classification'].iloc[0]):
-                            fin_statement_class = matching_rows['Financial Statement Classification'].iloc[0]
-                            account_type = self.determine_account_type(fin_statement_class)
-                            break
-                
-                missing_accounts.append({
-                    'Account ID': account_id,
-                    'Account Name': account_name,
-                    'Beginning Balance \n(Prior Period Balance)': 0.0,
-                    'Ending Balance': 0.0,
-                    'Account Type \n(see Mapping Categories tab)': account_type,
-                    'Account Mapping \n(see Mapping Categories tab)': '',
-                    'Account Description': fin_statement_class
-                })
+        for sheet_name, journal_entries in journal_entries_dict.items():
+            for _, row in journal_entries.iterrows():
+                account_id = str(row['Account ID'])
+                if account_id not in je_accounts:
+                    je_accounts[account_id] = {
+                        'Account ID': account_id,
+                        'Account Name': '',  # We don't have account names in journal entries
+                        'Beginning Balance \n(Prior Period Balance)': 0.0,
+                        'Ending Balance': 0.0,
+                        'Account Type \n(see Mapping Categories tab)': '',
+                        'Account Mapping \n(see Mapping Categories tab)': '',
+                        'Account Description': ''
+                    }
         
         # Add missing accounts to trial balance
+        missing_accounts = []
+        for account_id, account_data in je_accounts.items():
+            if account_id not in tb_account_ids and account_id.strip() != '':
+                missing_accounts.append(account_data)
+        
         if missing_accounts:
-            missing_df = pd.DataFrame(missing_accounts)
-            trial_balance = pd.concat([trial_balance, missing_df], ignore_index=True)
-            self.print_and_log(f"Added {len(missing_accounts)} missing accounts to trial balance")
+            self.print_and_log(f"\nAdding {len(missing_accounts)} missing accounts to trial balance")
+            missing_accounts_df = pd.DataFrame(missing_accounts)
+            trial_balance = pd.concat([trial_balance, missing_accounts_df], ignore_index=True)
         
-        return trial_balance, journal_entries
+        # Clean the data
+        trial_balance = self._clean_data_for_excel(trial_balance)
+        for sheet_name in journal_entries_dict:
+            journal_entries_dict[sheet_name] = self._clean_data_for_excel(journal_entries_dict[sheet_name])
+        
+        return trial_balance, journal_entries_dict
 
-    def _clean_data_for_excel(self, trial_balance, journal_entries):
-        """Apply ultra-aggressive data cleaning to prevent Excel corruption"""
-        # EXTREME data cleaning - replace everything potentially problematic
+    def _clean_data_for_excel(self, df):
+        """Clean data for Excel output"""
         def ultra_clean_value(value):
-            """Ultra-aggressive cleaning to remove any potential Excel corruption"""
+            """Clean individual values for Excel"""
             if pd.isna(value):
-                return ""
-            elif isinstance(value, (int, float)):
-                if math.isinf(value) or math.isnan(value) or abs(value) > 1e15:
-                    return 0.0
-                return float(value)
-            elif isinstance(value, pd.Timestamp):
-                try:
-                    # Return the datetime object itself, not a string
-                    # Excel will handle the formatting
-                    return value.to_pydatetime()
-                except:
-                    return ""
-            else:
-                try:
-                    # Convert to string and encode/decode to clean any encoding issues
-                    str_val = str(value).encode('ascii', errors='ignore').decode('ascii')
+                return ''
+            
+            # Convert to string and clean
+            str_value = str(value)
+            
+            # Remove or replace problematic characters
+            str_value = str_value.replace('\x00', '')  # Null bytes
+            str_value = str_value.replace('\r', ' ')   # Carriage returns
+            str_value = str_value.replace('\n', ' ')   # Line feeds
+            str_value = str_value.replace('\t', ' ')   # Tabs
+            
+            # Handle other potential issues
+            if len(str_value) > 32767:  # Excel cell character limit
+                str_value = str_value[:32767]
+            
+            return str_value
         
-                    # Remove any remaining problematic characters - be extremely aggressive
-                    import re
-                    # Keep only letters, numbers, spaces, basic punctuation
-                    cleaned = re.sub(r'[^\w\s\-\.\,\(\)\:\;\$\%\@\#\!\?\/\\]', ' ', str_val)
-                    
-                    # Replace multiple spaces with single space
-                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-                    
-                    # Limit length
-                    if len(cleaned) > 1000:  # Much shorter limit
-                        cleaned = cleaned[:1000]
-                    
-                    return cleaned
-                except:
-                    return "DATA_ERROR"
-
-        self.print_and_log("Ultra-cleaning all data...")
+        # Create a copy to avoid modifying the original
+        df_clean = df.copy()
         
-        # Clean trial balance
-        for col in trial_balance.columns:
-            trial_balance[col] = trial_balance[col].apply(ultra_clean_value)
+        # Clean all string columns
+        for col in df_clean.columns:
+            if df_clean[col].dtype == object:  # Only clean string/object columns
+                df_clean[col] = df_clean[col].apply(ultra_clean_value)
         
-        # Clean journal entries  
-        for col in journal_entries.columns:
-            journal_entries[col] = journal_entries[col].apply(ultra_clean_value)
-
-        return trial_balance, journal_entries
+        return df_clean
 
     def _create_excel_workbook(self):
         """Create Excel workbook with basic styling setup"""
@@ -736,76 +790,119 @@ class StrongboxParser:
         mapping_sheet = workbook.create_sheet('Mapping Categories')
         mapping_sheet.append(['Content for Mapping Categories'])
 
-    def _handle_excel_creation_error(self, e, output_file, trial_balance, journal_entries):
-        """Handle Excel creation errors with CSV fallback"""
-        self.print_and_log(f"openpyxl failed: {e}")
+    def _handle_excel_creation_error(self, e, output_file, trial_balance, journal_entries_dict):
+        """Handle errors during Excel file creation"""
+        self.print_and_log(f"\nERROR creating Excel file: {str(e)}")
+        self.print_and_log("Attempting to save data to CSV files instead...")
         
-        # Fallback to CSV files
-        csv_dir = os.path.dirname(output_file)
-        csv_base = os.path.splitext(os.path.basename(output_file))[0]
-        
-        tb_csv = os.path.join(csv_dir, f"{csv_base}_TrialBalance.csv")
-        je_csv = os.path.join(csv_dir, f"{csv_base}_JournalEntries.csv")
-        
-        # Write as CSV files
-        trial_balance.to_csv(tb_csv, index=False, encoding='utf-8')
-        journal_entries.to_csv(je_csv, index=False, encoding='utf-8')
-        
-        self.print_and_log(f"Created CSV files instead:")
-        self.print_and_log(f"Trial Balance: {tb_csv}")
-        self.print_and_log(f"Journal Entries: {je_csv}")
-            
-        # Try to create a minimal Excel file
         try:
-            workbook = openpyxl.Workbook()
-            sheet = workbook.active
-            sheet.title = "READ_ME"
-            sheet['A1'] = "Excel file creation failed due to data corruption issues."
-            sheet['A2'] = "Please use the CSV files created instead:"
-            sheet['A3'] = f"Trial Balance: {os.path.basename(tb_csv)}"
-            sheet['A4'] = f"Journal Entries: {os.path.basename(je_csv)}"
-            workbook.save(output_file)
-            workbook.close()
-        except:
-            pass
+            # Save trial balance
+            csv_base = os.path.splitext(output_file)[0]
+            trial_balance.to_csv(f"{csv_base}_trial_balance.csv", index=False)
+            self.print_and_log("✓ Saved trial balance to CSV")
+            
+            # Save each journal entries sheet
+            for sheet_name, journal_entries in journal_entries_dict.items():
+                safe_name = sheet_name.replace('/', '_').replace('\\', '_')
+                journal_entries.to_csv(f"{csv_base}_journal_entries_{safe_name}.csv", index=False)
+                self.print_and_log(f"✓ Saved journal entries from {sheet_name} to CSV")
+            
+            self.print_and_log("\nData has been saved to CSV files in the same directory.")
+            self.print_and_log("Please check these files and try to open them in Excel manually.")
+            
+        except Exception as csv_error:
+            self.print_and_log(f"\nERROR saving to CSV: {str(csv_error)}")
+            self.print_and_log("Unable to save data in any format.")
+            raise
 
     def create_output_file(self):
-        """Create output Excel file with both tabs"""
-        self.update_status("Creating output file...", 80)
+        """Create Excel output file with professional formatting"""
+        self.update_status('Creating Excel output...', 80)
+
+        start_str = self.start_date.strftime('%Y%m%d')
+        end_str = self.end_date.strftime('%Y%m%d')
+        self.output_filename = f'Processed_Strongbox_{start_str}_{end_str}.xlsx'
         
-        # Create output filename
-        output_file = self._setup_output_file_path()
-        
-        # Prepare output data
-        trial_balance, journal_entries = self._prepare_output_data()
-        
+        # Create output path
+        output_file = os.path.join(self.output_dir, self.output_filename)
+
+        # Create trial balance and journal entries
+        trial_balance = self.create_trial_balance()
+        journal_entries_dict = self.create_journal_entries()
+
         # Clean data for Excel
-        trial_balance, journal_entries = self._clean_data_for_excel(trial_balance, journal_entries)
+        trial_balance = self._clean_data_for_excel(trial_balance)
+        for sheet_name in journal_entries_dict:
+            journal_entries_dict[sheet_name] = self._clean_data_for_excel(journal_entries_dict[sheet_name])
+
+        # Create Excel workbook with proper styling
+        workbook, styles = self._create_excel_workbook()
+
+        # Create main data sheets first (in desired order)
+        tb_sheet = self._create_trial_balance_sheet(workbook, trial_balance, styles)
+        je_sheets = self._create_journal_entries_sheets(workbook, journal_entries_dict, styles)
         
-        # Use openpyxl with aggressive error handling
-        try:
-            workbook, styles = self._create_excel_workbook()
-            
-            # Create main data sheets first (in desired order)
-            tb_sheet = self._create_trial_balance_sheet(workbook, trial_balance, styles)
-            je_sheet = self._create_journal_entries_sheet(workbook, journal_entries, styles)
-            
-            # Create other sheets after main data sheets
-            self._create_other_sheets(workbook, styles)
-            
-            # Save with openpyxl
-            workbook.save(output_file)
-            self.print_and_log("File created successfully with openpyxl, aggressive data cleaning, and styling")
-            
-        except Exception as e:
-            self._handle_excel_creation_error(e, output_file, trial_balance, journal_entries)
-        
-        self.update_status("Saving workbook...", 99)
+        # Create Non-USD Transactions sheet if needed
+        if self.non_usd_transactions:
+            self._create_non_usd_transactions_sheet(workbook, styles)
+
+        # Create other sheets after main data sheets
+        self._create_other_sheets(workbook, styles)
+
+        # Save workbook
+        workbook.save(output_file)
+        workbook.close()
+
+        self.print_and_log(f'✅ Output file created: {output_file}')
         return output_file
 
     def process_data(self):
         """Process the data and create output file"""
         try:
+            # Currency check - same as notebook
+            self.print_and_log('')
+            self.print_and_log('💰 CHECKING PRESENTATION CURRENCY...')
+            self.print_and_log('=' * 40)
+            
+            currency_found = False
+            currency_message = ""
+            
+            try:
+                self.print_and_log('📋 Opening file to check TOC tab...')
+                wb = openpyxl.load_workbook(self.source_file, data_only=True, read_only=True)
+                self.print_and_log(f'📋 Available sheets: {wb.sheetnames}')
+                
+                if 'TOC' in wb.sheetnames:
+                    self.print_and_log('📋 TOC tab found, checking cell C10...')
+                    toc_sheet = wb['TOC']
+                    currency_cell = toc_sheet['C10'].value
+                    self.print_and_log(f'📋 Raw value in C10: "{currency_cell}"')
+                    
+                    if currency_cell:
+                        currency = str(currency_cell).strip()
+                        self.print_and_log(f'📋 Cleaned currency value: "{currency}"')
+                        
+                        if currency.lower() == '(usd) united states dollar':
+                            currency_message = '✅ PRESENTATION CURRENCY: USD ✅'
+                        else:
+                            currency_message = f'⚠️ WARNING: PRESENTATION CURRENCY IS NOT USD! ⚠️\n    Found: "{currency}"'
+                        currency_found = True
+                    else:
+                        currency_message = '⚠️ Cell C10 in TOC tab is empty'
+                else:
+                    currency_message = '⚠️ TOC tab not found in file'
+                    
+                wb.close()
+                
+            except Exception as e:
+                currency_message = f'⚠️ Error checking currency: {str(e)}'
+            
+            # Always show the currency result
+            self.print_and_log('')
+            self.print_and_log(currency_message)
+            self.print_and_log('=' * 40)
+            self.print_and_log('')
+            
             # Determine date range automatically
             self.date_columns = self.determine_date_range()
             
@@ -993,6 +1090,41 @@ class StrongboxParser:
                 self.print_and_log(f"Warning: Column '{col}' not found in sheet {sheet_name}. Skipping conversion.")
         
         return df
+
+    def _check_non_usd_transactions(self, df, sheet_name):
+        """Check for non-USD transactions and store them separately"""
+        if 'Transaction Currency' not in df.columns:
+            self.print_and_log(f"INFO: No 'Transaction Currency' column found in {sheet_name}. Assuming all transactions are USD.")
+            return
+        
+        # Check for non-USD transactions
+        non_usd_mask = (df['Transaction Currency'].notna()) & (df['Transaction Currency'].str.upper() != 'USD')
+        non_usd_df = df[non_usd_mask]
+        
+        if len(non_usd_df) > 0:
+            self.print_and_log(f"⚠️ Found {len(non_usd_df)} non-USD transactions in {sheet_name}")
+            
+            # Store non-USD transactions for the separate tab
+            for _, row in non_usd_df.iterrows():
+                non_usd_data = {
+                    'Journal ID': str(row.get('Transaction Id', '')),
+                    'Type': str(row.get('Transaction Type', '')),
+                    'Journal Entry Description': str(row.get('Doc/Ref No', '')),
+                    'Posted Date': row.get('Transaction Date', ''),
+                    'Account ID': str(row.get('Account Id', '')),
+                    'Journal Line Description': str(row.get('Memo', '')),
+                    'Name': str(row.get('Relationship Name', '')),
+                    'Debit Amount': float(row.get('Debit', 0)),
+                    'Credit Amount': float(row.get('Credit', 0)),
+                    'Transaction Currency': str(row.get('Transaction Currency', ''))
+                }
+                self.non_usd_transactions.append(non_usd_data)
+            
+            # Remove non-USD transactions from the main dataframe
+            df.drop(non_usd_df.index, inplace=True)
+            self.print_and_log(f"INFO: Removed {len(non_usd_df)} non-USD transactions from {sheet_name}. Remaining transactions: {len(df)}")
+        else:
+            self.print_and_log(f"INFO: All transactions in {sheet_name} are USD.")
 
     def _process_date_columns(self, df, sheet_name):
         """Process and validate date columns in the DataFrame"""
@@ -1345,92 +1477,158 @@ class StrongboxParser:
         
         return tb_sheet
 
-    def _create_journal_entries_sheet(self, workbook, journal_entries, styles):
-        """Create and format the Journal Entries & Lines sheet"""
-        # Create journal entries sheet
-        je_sheet = workbook.create_sheet('Journal Entries & Lines')
+    def _create_journal_entries_sheets(self, workbook, journal_entries_dict, styles):
+        """Create and format multiple Journal Entries & Lines sheets, one for each TXN sheet"""
+        # Create journal entries sheets
+        created_sheets = []
         
-        # Set column widths for journal entries (converting px to Excel units)
-        je_sheet.column_dimensions['A'].width = 14.3  # 100px
-        je_sheet.column_dimensions['B'].width = 48.6  # 340px
-        je_sheet.column_dimensions['C'].width = 15.7  # 110px
-        je_sheet.column_dimensions['D'].width = 20.0  # 140px
-        je_sheet.column_dimensions['E'].width = 35.7  # 250px
-        je_sheet.column_dimensions['F'].width = 15.7  # 110px
-        je_sheet.column_dimensions['G'].width = 15.7  # 110px
+        # Sort the sheets by name to ensure consistent ordering
+        sheet_names = sorted(journal_entries_dict.keys())
         
-        # Write headers
-        je_sheet.append(['Required', 'Optional', 'Required', 'Required', 'Required', 'Required', 'Required'])
-        je_sheet.append(list(journal_entries.columns))
+        for idx, sheet_name in enumerate(sheet_names, 1):
+            journal_entries = journal_entries_dict[sheet_name]
+            sheet_title = f'Journal Entries & Lines {idx}'
+            
+            # Create the sheet
+            je_sheet = workbook.create_sheet(sheet_title)
+            
+            # Set column widths for journal entries (converting px to Excel units)
+            je_sheet.column_dimensions['A'].width = 14.3  # 100px
+            je_sheet.column_dimensions['B'].width = 48.6  # 340px
+            je_sheet.column_dimensions['C'].width = 15.7  # 110px
+            je_sheet.column_dimensions['D'].width = 20.0  # 140px
+            je_sheet.column_dimensions['E'].width = 35.7  # 250px
+            je_sheet.column_dimensions['F'].width = 15.7  # 110px
+            je_sheet.column_dimensions['G'].width = 15.7  # 110px
+            je_sheet.column_dimensions['H'].width = 15.7  # 110px
+            je_sheet.column_dimensions['I'].width = 15.7  # 110px
+            
+            # Write headers
+            je_sheet.append(['Required', 'Optional', 'Optional', 'Required', 'Required', 'Required', 'Optional', 'Required', 'Required'])
+            je_sheet.append(list(journal_entries.columns))
+            
+            # Style row 1 headers (Required/Optional)
+            required_cols = [1, 4, 5, 6, 8, 9]  # Columns A, D, E, F, H, I
+            optional_cols = [2, 3, 7]  # Columns B, C, G
+            
+            for col in required_cols:
+                cell = je_sheet.cell(row=1, column=col)
+                cell.font = styles['header_font']
+                cell.fill = styles['blue_fill']
+                cell.alignment = styles['center_alignment']
+            
+            for col in optional_cols:
+                cell = je_sheet.cell(row=1, column=col)
+                cell.font = styles['header_font']
+                cell.fill = styles['gray_fill']
+                cell.alignment = styles['center_alignment']
+            
+            # Style row 2 headers (column names)
+            for col in range(1, 10):  # All columns
+                cell = je_sheet.cell(row=2, column=col)
+                cell.font = styles['header_font']
+                cell.fill = styles['dark_blue_fill']
+                cell.alignment = styles['center_alignment']
+            
+            # Write journal entries data with error handling
+            for _, row in journal_entries.iterrows():
+                row_values = []
+                for col in journal_entries.columns:
+                    value = row[col]
+                    try:
+                        # Double-check the value is clean
+                        if isinstance(value, str) and len(value) > 1000:
+                            value = value[:1000]
+                        row_values.append(value)
+                    except:
+                        row_values.append("ERROR")
+                je_sheet.append(row_values)
+            
+            # Apply date formatting to column D (Posted Date) in Journal Entries & Lines
+            for row_num in range(3, je_sheet.max_row + 1):  # Start from row 3 (after headers)
+                cell = je_sheet.cell(row=row_num, column=4)
+                cell.number_format = 'M/D/YYYY'
+            
+            created_sheets.append(je_sheet)
+            self.print_and_log(f"Created sheet '{sheet_title}' from {sheet_name}")
+        
+        return created_sheets
+
+    def _create_non_usd_transactions_sheet(self, workbook, styles):
+        """Create Non-USD Transactions sheet with Journal Entries columns plus Transaction Currency"""
+        non_usd_sheet = workbook.create_sheet('Non-USD Transactions')
+        
+        if not self.non_usd_transactions:
+            return non_usd_sheet
+        
+        # Set column widths (optimized for Journal Entries format)
+        non_usd_sheet.column_dimensions['A'].width = 14.3  # Journal ID
+        non_usd_sheet.column_dimensions['B'].width = 48.6  # Type
+        non_usd_sheet.column_dimensions['C'].width = 15.7  # Journal Entry Description
+        non_usd_sheet.column_dimensions['D'].width = 20.0  # Posted Date
+        non_usd_sheet.column_dimensions['E'].width = 35.7  # Account ID
+        non_usd_sheet.column_dimensions['F'].width = 15.7  # Journal Line Description
+        non_usd_sheet.column_dimensions['G'].width = 15.7  # Name
+        non_usd_sheet.column_dimensions['H'].width = 15.7  # Debit Amount
+        non_usd_sheet.column_dimensions['I'].width = 15.7  # Credit Amount
+        non_usd_sheet.column_dimensions['J'].width = 15.7  # Transaction Currency
+        
+        # Write headers (Journal Entries & Lines columns + Transaction Currency)
+        non_usd_sheet.append(['Required', 'Optional', 'Optional', 'Required', 'Required', 'Required', 'Optional', 'Required', 'Required', 'Required'])
+        non_usd_sheet.append(self.non_usd_headers)
         
         # Style row 1 headers (Required/Optional)
-        required_cols = [1, 3, 4, 5, 6, 7]  # Columns A, C, D, E, F, G
-        optional_cols = [2]  # Column B
+        required_cols = [1, 4, 5, 6, 8, 9, 10]  # Columns A, D, E, F, H, I, J
+        optional_cols = [2, 3, 7]  # Columns B, C, G
         
         for col in required_cols:
-            cell = je_sheet.cell(row=1, column=col)
+            cell = non_usd_sheet.cell(row=1, column=col)
             cell.font = styles['header_font']
             cell.fill = styles['blue_fill']
             cell.alignment = styles['center_alignment']
         
         for col in optional_cols:
-            cell = je_sheet.cell(row=1, column=col)
+            cell = non_usd_sheet.cell(row=1, column=col)
             cell.font = styles['header_font']
             cell.fill = styles['gray_fill']
             cell.alignment = styles['center_alignment']
         
         # Style row 2 headers (column names)
-        for col in range(1, 8):  # All columns
-            cell = je_sheet.cell(row=2, column=col)
+        for col_idx in range(1, len(self.non_usd_headers) + 1):
+            cell = non_usd_sheet.cell(row=2, column=col_idx)
             cell.font = styles['header_font']
             cell.fill = styles['dark_blue_fill']
             cell.alignment = styles['center_alignment']
         
-        # Write journal entries data with error handling
-        for _, row in journal_entries.iterrows():
-            row_values = []
-            for col in journal_entries.columns:
-                value = row[col]
-                try:
-                    # Double-check the value is clean
-                    if isinstance(value, str) and len(value) > 1000:
-                        value = value[:1000]
-                    row_values.append(value)
-                except:
-                    row_values.append("ERROR")
-            je_sheet.append(row_values)
+        # Write non-USD transaction data
+        for transaction in self.non_usd_transactions:
+            row_data = []
+            for header in self.non_usd_headers:
+                value = transaction.get(header, '')
+                # Clean the value for Excel
+                if isinstance(value, str) and len(value) > 1000:
+                    value = value[:1000]
+                row_data.append(value)
+            non_usd_sheet.append(row_data)
         
-        # Apply date formatting to column C (Posted Date) in Journal Entries & Lines
-        for row_num in range(3, je_sheet.max_row + 1):  # Start from row 3 (after headers)
-            cell = je_sheet.cell(row=row_num, column=3)
+        # Apply date formatting to Posted Date column (column D)
+        for row_num in range(3, non_usd_sheet.max_row + 1):
+            cell = non_usd_sheet.cell(row=row_num, column=4)
             cell.number_format = 'M/D/YYYY'
         
-        return je_sheet
+        self.print_and_log(f"Created Non-USD Transactions sheet with {len(self.non_usd_transactions)} transactions")
+        return non_usd_sheet
 
     def _extract_balances_from_tb_data(self, account_id, begin_date, end_date):
         """Extract beginning and ending balances from TB-DATA sheet for a specific account"""
         if 'TB-DATA' not in self.source_data or self.source_data['TB-DATA'] is None:
             return 0.0, 0.0
-        
+
         tb_data = self.source_data['TB-DATA']
-        
-        # Debug: Show the first few rows and column structure for the first account only
-        if not hasattr(self, '_tb_data_debug_shown'):
-            self.print_and_log("\nDEBUG: TB-DATA structure for balance extraction:")
-            self.print_and_log(f"TB-DATA columns: {tb_data.columns.tolist()}")
-            self.print_and_log("First 3 rows of TB-DATA:")
-            for i in range(min(3, len(tb_data))):
-                row_data = []
-                for j in range(min(8, len(tb_data.columns))):  # Show first 8 columns
-                    row_data.append(f"Col{j}: {tb_data.iloc[i, j]}")
-                self.print_and_log(f"Row {i}: {', '.join(row_data)}")
-            self._tb_data_debug_shown = True
-        
+
         # Find the account in TB-DATA
-        # Try different possible account ID column positions
         account_data = None
-        account_col_found = None
-        
+
         # Check columns B through D (indices 1-3) for Account ID
         for col_idx in [1, 2, 3]:
             try:
@@ -1438,19 +1636,16 @@ class StrongboxParser:
                     matching_rows = tb_data[tb_data.iloc[:, col_idx].astype(str) == str(account_id)]
                     if not matching_rows.empty:
                         account_data = matching_rows
-                        account_col_found = col_idx
                         break
             except Exception:
                 continue
-        
+
         if account_data is None or account_data.empty:
-            # Account not found in TB-DATA
             return 0.0, 0.0
-        
+
         begin_balance = 0.0
         end_balance = 0.0
-        matches_found = 0
-        
+
         # Find balances matching our target dates
         for _, row in account_data.iterrows():
             try:
@@ -1458,19 +1653,10 @@ class StrongboxParser:
                 fiscal_month_val = row.iloc[0]
                 if pd.isna(fiscal_month_val):
                     continue
-                
+
                 # Try to parse the fiscal month date
                 fiscal_month = pd.to_datetime(fiscal_month_val)
-                
-                # Column E (index 4) is Starting Account Balance  
-                starting_balance_val = row.iloc[4] if len(row) > 4 else 0.0
-                starting_balance = 0.0
-                if pd.notna(starting_balance_val):
-                    try:
-                        starting_balance = float(starting_balance_val)
-                    except (ValueError, TypeError):
-                        starting_balance = 0.0
-                
+
                 # Column G (index 6) is Ending Account Balance
                 ending_balance_val = row.iloc[6] if len(row) > 6 else 0.0
                 ending_balance = 0.0
@@ -1479,24 +1665,18 @@ class StrongboxParser:
                         ending_balance = float(ending_balance_val)
                     except (ValueError, TypeError):
                         ending_balance = 0.0
-                
+
                 # Check if fiscal month matches our target dates
+                # Both beginning and ending balance use Ending Account Balance
                 if fiscal_month.date() == begin_date.date():
-                    begin_balance = ending_balance  # Changed from starting_balance to ending_balance
-                    matches_found += 1
-                    
+                    begin_balance = ending_balance
+
                 if fiscal_month.date() == end_date.date():
                     end_balance = ending_balance
-                    matches_found += 1
-                    
-            except Exception as e:
+
+            except Exception:
                 continue
-        
-        # Debug for first few accounts
-        if matches_found > 0 and not hasattr(self, f'_balance_debug_{account_id}'):
-            self.print_and_log(f"Found balances for account {account_id}: Begin={begin_balance}, End={end_balance}")
-            setattr(self, f'_balance_debug_{account_id}', True)
-        
+
         return begin_balance, end_balance
 
 if __name__ == "__main__":
