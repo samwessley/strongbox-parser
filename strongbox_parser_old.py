@@ -31,7 +31,6 @@ class StrongboxParser:
         self.output_filename = None
         self.console_output = None  # Will hold the text widget for console output
         self.date_columns = {}
-        self.presentation_currency = None  # Store presentation currency from TOC tab
         self.non_usd_transactions = []  # Store non-USD transactions
         self.non_usd_headers = ['Journal ID', 'Type', 'Journal Entry Description', 'Posted Date', 'Account ID', 'Journal Line Description', 'Name', 'Debit Amount', 'Credit Amount', 'Transaction Currency']  # Headers for non-USD transactions tab
 
@@ -71,8 +70,9 @@ class StrongboxParser:
                 sheet_name='TB',
                 header=None,
                 nrows=1,
-                skiprows=3
-                # Removed pyarrow dependency for better compatibility
+                skiprows=3,
+                dtype_backend='pyarrow',  # Use Arrow for better performance
+                parse_dates=True  # Automatically parse dates
             )
             date_row = date_row.iloc[0]
 
@@ -96,16 +96,6 @@ class StrongboxParser:
 
             self.print_and_log(f'📅 Date range: {self.start_date.strftime("%Y-%m-%d")} to {self.end_date.strftime("%Y-%m-%d")}')
             self.print_and_log(f'📅 Found {len(date_columns)} valid dates in TB sheet')
-
-            # Print the TB sheet date row using openpyxl for debugging
-            wb = openpyxl.load_workbook(self.source_file, data_only=True, read_only=True)
-            tb_sheet = wb['TB']
-            date_row_idx = 4  # 1-based index for openpyxl (row 4 is the date row)
-            date_row_values = [tb_sheet.cell(row=date_row_idx, column=col_idx).value for col_idx in range(1, tb_sheet.max_column + 1)]
-            self.print_and_log(f"DEBUG: TB sheet date row (row 4):")
-            for idx, val in enumerate(date_row_values):
-                self.print_and_log(f"  Col {idx+1}: {val}")
-            wb.close()
 
             return date_columns
 
@@ -264,47 +254,133 @@ class StrongboxParser:
             self.print_and_log("  • TB-DATA sheet: Found")
             self.print_and_log(f"  • Transaction sheets: Found {len(txn_sheets)} sheets ({', '.join(txn_sheets)})")
 
-            # Process TXN sheets using pandas for better performance with large datasets
+            # Process TXN sheets
             for sheet_name in txn_sheets:
                 try:
-                    # Read the sheet with pandas
-                    df = pd.read_excel(self.source_file, sheet_name=sheet_name)
+                    sheet = workbook[sheet_name]
+
+                    # Get headers from first row
+                    headers = [cell.value for cell in next(sheet.rows)]
+
+                    # Find column indices
+                    col_indices = {
+                        'Transaction Id': headers.index('Transaction Id'),
+                        'Transaction Date': headers.index('Transaction Date'),
+                        'Fiscal Month': headers.index('Fiscal Month'),
+                        'Account Id': headers.index('Account Id'),
+                        'Memo': headers.index('Memo'),
+                        'Doc/Ref No': headers.index('Doc/Ref No'),
+                        'Debit': headers.index('Debit'),
+                        'Credit': headers.index('Credit')
+                    }
                     
+                    # Check if Transaction Currency column exists
+                    currency_col_idx = None
+                    if 'Transaction Currency' in headers:
+                        currency_col_idx = headers.index('Transaction Currency')
+
+                    # Process rows in chunks for memory efficiency
+                    data = []
+                    chunk_size = 1000
+                    chunk = []
+
+                    for row in sheet.iter_rows(min_row=2):
+                        values = {
+                            'Transaction Id': str(row[col_indices['Transaction Id']].value or ''),
+                            'Transaction Date': row[col_indices['Transaction Date']].value,
+                            'Fiscal Month': row[col_indices['Fiscal Month']].value,
+                            'Account Id': str(row[col_indices['Account Id']].value or ''),
+                            'Memo': str(row[col_indices['Memo']].value or ''),
+                            'Doc/Ref No': str(row[col_indices['Doc/Ref No']].value or ''),
+                            'Debit': float(row[col_indices['Debit']].value or 0),
+                            'Credit': float(row[col_indices['Credit']].value or 0)
+                        }
+
+                        # Extract Transaction Type and Relationship Name if they exist
+                        if 'Transaction Type' in headers:
+                            values['Transaction Type'] = str(row[headers.index('Transaction Type')].value or '')
+                        else:
+                            values['Transaction Type'] = ''
+                            
+                        if 'Relationship Name' in headers:
+                            values['Relationship Name'] = str(row[headers.index('Relationship Name')].value or '')
+                        else:
+                            values['Relationship Name'] = ''
+
+                        # Check for non-USD transactions
+                        if currency_col_idx is not None:
+                            transaction_currency = str(row[currency_col_idx].value or '').strip()
+                            if transaction_currency and transaction_currency.upper() != 'USD':
+                                # Store only the relevant columns for non-USD transactions tab
+                                # Get Transaction Type and Relationship Name if they exist
+                                transaction_type = ''
+                                relationship_name = ''
+                                
+                                if 'Transaction Type' in headers:
+                                    transaction_type = str(row[headers.index('Transaction Type')].value or '')
+                                if 'Relationship Name' in headers:
+                                    relationship_name = str(row[headers.index('Relationship Name')].value or '')
+                                
+                                non_usd_data = {
+                                    'Journal ID': values['Transaction Id'],
+                                    'Type': transaction_type,
+                                    'Journal Entry Description': values['Doc/Ref No'],
+                                    'Posted Date': values['Transaction Date'],
+                                    'Account ID': values['Account Id'],
+                                    'Journal Line Description': values['Memo'],
+                                    'Name': relationship_name,
+                                    'Debit Amount': values['Debit'],
+                                    'Credit Amount': values['Credit'],
+                                    'Transaction Currency': transaction_currency
+                                }
+                                
+                                self.non_usd_transactions.append(non_usd_data)
+
+                        # Convert dates if needed
+                        for date_col in ['Transaction Date', 'Fiscal Month']:
+                            if values[date_col] and not isinstance(values[date_col], datetime):
+                                try:
+                                    values[date_col] = pd.to_datetime(values[date_col])
+                                except:
+                                    values[date_col] = None
+
+                        chunk.append(values)
+
+                        if len(chunk) >= chunk_size:
+                            data.extend(chunk)
+                            chunk = []
+
+                    if chunk:
+                        data.extend(chunk)
+
+                    # Create DataFrame from processed data
+                    df = pd.DataFrame(data)
+
                     # Filter by date range if needed
                     if self.start_date is not None and self.end_date is not None and 'Fiscal Month' in df.columns:
-                        # Include transactions on the begin_balance_date (before start_date) as they are part of the period
-                        df = df[(df['Fiscal Month'] >= self.begin_balance_date) & (df['Fiscal Month'] <= self.end_date)]
-                    
+                        df = df[(df['Fiscal Month'] >= self.start_date) & (df['Fiscal Month'] <= self.end_date)]
+
                     if not df.empty:
-                        # Clean and convert data types
-                        df['Transaction Id'] = df['Transaction Id'].astype(str)
-                        df['Account Id'] = df['Account Id'].astype(str)
-                        df['Memo'] = df['Memo'].fillna('')
-                        df['Doc/Ref No'] = df['Doc/Ref No'].fillna('')
-                        df['Transaction Type'] = df['Transaction Type'].fillna('')
-                        df['Relationship Name'] = df['Relationship Name'].fillna('')
-                        df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
-                        df['Credit'] = pd.to_numeric(df['Credit'], errors='coerce').fillna(0)
-                        
-                        # Check for non-USD transactions if presentation currency is not USD
-                        self._check_non_usd_transactions(df, sheet_name)
-                        
-                        # Store the processed data
                         self.source_data[sheet_name] = df
-                        self.print_and_log(f"✅ {sheet_name}: {len(df)} transactions loaded")
-                    else:
-                        self.print_and_log(f"⚠️ {sheet_name}: No transactions in date range")
+                        self.print_and_log(f'✅ {sheet_name}: {len(df)} transactions loaded')
 
                 except Exception as e:
-                    self.print_and_log(f"⚠️ Error loading {sheet_name}: {str(e)}")
+                    self.print_and_log(f'⚠️ Error loading {sheet_name}: {str(e)}')
 
             # Load TB-DATA sheet
             self.print_and_log("\nLoading TB-DATA sheet...")
             self.update_status("Loading TB-DATA sheet...", 25)
             try:
-                tb_data = pd.read_excel(self.source_file, sheet_name='TB-DATA')
-                self.source_data['TB-DATA'] = tb_data
-                self.print_and_log(f"✅ Successfully loaded TB-DATA sheet with {len(tb_data)} rows")
+                sheet = workbook['TB-DATA']
+                headers = [cell.value for cell in next(sheet.rows)]
+                data = []
+
+                for row in sheet.iter_rows(min_row=2):
+                    values = {header: cell.value for header, cell in zip(headers, row)}
+                    data.append(values)
+
+                self.source_data['TB-DATA'] = pd.DataFrame(data)
+                self.print_and_log(f"✅ Successfully loaded TB-DATA sheet with {len(data)} rows")
 
             except Exception as e:
                 self.print_and_log(f"⚠️ Warning: Could not load TB-DATA sheet: {str(e)}")
@@ -440,78 +516,76 @@ class StrongboxParser:
         """Create Comparative Trial Balances tab"""
         self.update_status("Creating trial balance...", 70)
         tb_data = self.source_data['TB']
-        tb_data_data = self.source_data.get('TB-DATA')
-
+        
         # Only filter out exact header matches, not all rows containing "account"
         tb_data = tb_data[~((tb_data['Account Id'].str.lower() == "account id") | 
                            (tb_data['Account Id'].str.lower() == "account"))]
-
-        # Get the earliest and latest TB dates from the TB sheet's date row
-        tb_dates = sorted(self.date_columns.keys())
-        begin_tb_date = tb_dates[0]
-        end_tb_date = tb_dates[-1]
-
-        # Build a mapping from (Account Id, Fiscal Month) to Ending Account Balance
-        tbdata_lookup = {}
-        if tb_data_data is not None:
-            for _, row in tb_data_data.iterrows():
-                acc_id = str(row['Account Id']) if 'Account Id' in row else str(row[1])
-                fiscal_month = pd.to_datetime(row['Fiscal Month']) if pd.notna(row['Fiscal Month']) else None
-                if fiscal_month is not None:
-                    key = (acc_id, fiscal_month)
-                    bal = row['Ending Account Balance'] if 'Ending Account Balance' in row else row.iloc[6]
-                    try:
-                        bal = float(bal) if pd.notna(bal) else 0.0
-                    except (ValueError, TypeError):
-                        bal = 0.0
-                    tbdata_lookup[key] = bal
-
-        begin_balances = []
-        end_balances = []
-        for acc_id in tb_data['Account Id']:
-            acc_id_str = str(acc_id)
-            begin_bal = tbdata_lookup.get((acc_id_str, begin_tb_date), 0.0)
-            end_bal = tbdata_lookup.get((acc_id_str, end_tb_date), 0.0)
-            begin_balances.append(begin_bal)
-            end_balances.append(end_bal)
-
+        
+        # Create new dataframe with required columns, but we'll update balances from TB-DATA
         trial_balance = pd.DataFrame({
             'Account ID': tb_data['Account Id'],
             'Account Name': tb_data['Account Name'],
-            'Beginning Balance \n(Prior Period Balance)': begin_balances,
-            'Ending Balance': end_balances,
+            'Beginning Balance \n(Prior Period Balance)': 0.0,  # Will be populated from TB-DATA
+            'Ending Balance': 0.0,  # Will be populated from TB-DATA
             'Account Type \n(see Mapping Categories tab)': '',
             'Account Mapping \n(see Mapping Categories tab)': '',
             'Account Description': tb_data['Financial Statement Classification']
         })
-
+        
+        # Update balances from TB-DATA sheet
+        self.print_and_log("\nUpdating balances from TB-DATA sheet...")
+        self.update_status("Updating balances from TB-DATA...", 72)
+        
+        updated_accounts = 0
+        total_begin_from_tbdata = 0.0
+        total_end_from_tbdata = 0.0
+        
+        for idx, row in trial_balance.iterrows():
+            account_id = row['Account ID']
+            begin_balance, end_balance = self._extract_balances_from_tb_data(
+                account_id, self.begin_balance_date, self.end_date
+            )
+            
+            trial_balance.at[idx, 'Beginning Balance \n(Prior Period Balance)'] = begin_balance
+            trial_balance.at[idx, 'Ending Balance'] = end_balance
+            
+            total_begin_from_tbdata += begin_balance
+            total_end_from_tbdata += end_balance
+            
+            if begin_balance != 0.0 or end_balance != 0.0:
+                updated_accounts += 1
+        
+        self.print_and_log(f"Updated balances for {updated_accounts} accounts from TB-DATA")
+        self.print_and_log(f"Total balances extracted from TB-DATA: Begin={total_begin_from_tbdata}, End={total_end_from_tbdata}")
+        
         # Apply the class method to populate the Account Type column
         trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
-
+        
         # Count how many accounts were classified for each type
         account_type_counts = trial_balance['Account Type \n(see Mapping Categories tab)'].value_counts()
         self.print_and_log("\nAccount Type classification summary:")
         for account_type, count in account_type_counts.items():
             if account_type != '':
                 self.print_and_log(f"  {account_type}: {count} accounts")
-
+        
+        # Fix f-string syntax error by extracting column name with backslash
         account_type_col = 'Account Type \n(see Mapping Categories tab)'
         unclassified_count = (trial_balance[account_type_col] == '').sum()
         self.print_and_log(f"  Unclassified: {unclassified_count} accounts")
-
+        
         # Debug info
         self.print_and_log("\nTrial Balance DataFrame - first few rows:")
         self.print_and_log(f"Column names: {trial_balance.columns.tolist()}")
         self.print_and_log("First 5 rows:")
         self.print_and_log(trial_balance.head(5))
         self.print_and_log(f"Total rows in trial balance: {len(trial_balance)}")
-
+        
         # Calculate sum of beginning and ending balances
         begin_sum = trial_balance['Beginning Balance \n(Prior Period Balance)'].sum()
         end_sum = trial_balance['Ending Balance'].sum()
         self.print_and_log(f"Sum of Beginning Balances: {begin_sum}")
         self.print_and_log(f"Sum of Ending Balances: {end_sum}")
-
+        
         # Show a few sample balances to verify they're being set correctly
         self.print_and_log("\nSample balance values from trial balance:")
         for idx in range(min(5, len(trial_balance))):
@@ -519,7 +593,12 @@ class StrongboxParser:
             begin_bal = trial_balance.at[idx, 'Beginning Balance \n(Prior Period Balance)']
             end_bal = trial_balance.at[idx, 'Ending Balance']
             self.print_and_log(f"Account {account_id}: Begin={begin_bal}, End={end_bal}")
-
+        
+        # Check data types
+        self.print_and_log(f"\nData types:")
+        self.print_and_log(f"Beginning Balance column type: {trial_balance['Beginning Balance \n(Prior Period Balance)'].dtype}")
+        self.print_and_log(f"Ending Balance column type: {trial_balance['Ending Balance'].dtype}")
+        
         # Only remove rows that are definitely headers (contain exactly "Account ID")
         headers_to_remove = []
         for idx, row in trial_balance.iterrows():
@@ -527,16 +606,16 @@ class StrongboxParser:
             if account_id == "account id" or account_id == "account":
                 headers_to_remove.append(idx)
                 self.print_and_log(f"Removing header row: {row['Account ID']}")
-
+        
         if headers_to_remove:
             trial_balance = trial_balance.drop(headers_to_remove)
-
+        
         # Verify there are no empty account IDs but don't filter out other accounts
         trial_balance = trial_balance[trial_balance['Account ID'].notna() & (trial_balance['Account ID'] != '')]
-
+        
         # Reset the index after filtering
         trial_balance = trial_balance.reset_index(drop=True)
-
+        
         return trial_balance
 
     def _setup_output_file_path(self):
@@ -774,8 +853,8 @@ class StrongboxParser:
         tb_sheet = self._create_trial_balance_sheet(workbook, trial_balance, styles)
         je_sheets = self._create_journal_entries_sheets(workbook, journal_entries_dict, styles)
         
-        # Create Non-USD Transactions sheet if needed (only when presentation currency is not USD)
-        if self.non_usd_transactions and self.presentation_currency != '(usd) united states dollar':
+        # Create Non-USD Transactions sheet if needed
+        if self.non_usd_transactions:
             self._create_non_usd_transactions_sheet(workbook, styles)
 
         # Create other sheets after main data sheets
@@ -813,9 +892,6 @@ class StrongboxParser:
                     if currency_cell:
                         currency = str(currency_cell).strip()
                         self.print_and_log(f'📋 Cleaned currency value: "{currency}"')
-                        
-                        # Store the presentation currency
-                        self.presentation_currency = currency.lower()
                         
                         if currency.lower() == '(usd) united states dollar':
                             currency_message = '✅ PRESENTATION CURRENCY: USD ✅'
@@ -1027,45 +1103,39 @@ class StrongboxParser:
         return df
 
     def _check_non_usd_transactions(self, df, sheet_name):
-        """Check for non-USD transactions and store them separately only if presentation currency is not USD"""
+        """Check for non-USD transactions and store them separately"""
         if 'Transaction Currency' not in df.columns:
             self.print_and_log(f"INFO: No 'Transaction Currency' column found in {sheet_name}. Assuming all transactions are USD.")
             return
         
-        # Only separate non-USD transactions if presentation currency is not USD
-        if self.presentation_currency != '(usd) united states dollar':
-            self.print_and_log(f"INFO: Presentation currency is not USD, separating non-USD transactions in {sheet_name}")
+        # Check for non-USD transactions
+        non_usd_mask = (df['Transaction Currency'].notna()) & (df['Transaction Currency'].str.upper() != 'USD')
+        non_usd_df = df[non_usd_mask]
+        
+        if len(non_usd_df) > 0:
+            self.print_and_log(f"⚠️ Found {len(non_usd_df)} non-USD transactions in {sheet_name}")
             
-            # Check for non-USD transactions
-            non_usd_mask = (df['Transaction Currency'].notna()) & (df['Transaction Currency'].str.upper() != 'USD')
-            non_usd_df = df[non_usd_mask]
+            # Store non-USD transactions for the separate tab
+            for _, row in non_usd_df.iterrows():
+                non_usd_data = {
+                    'Journal ID': str(row.get('Transaction Id', '')),
+                    'Type': str(row.get('Transaction Type', '')),
+                    'Journal Entry Description': str(row.get('Doc/Ref No', '')),
+                    'Posted Date': row.get('Transaction Date', ''),
+                    'Account ID': str(row.get('Account Id', '')),
+                    'Journal Line Description': str(row.get('Memo', '')),
+                    'Name': str(row.get('Relationship Name', '')),
+                    'Debit Amount': float(row.get('Debit', 0)),
+                    'Credit Amount': float(row.get('Credit', 0)),
+                    'Transaction Currency': str(row.get('Transaction Currency', ''))
+                }
+                self.non_usd_transactions.append(non_usd_data)
             
-            if len(non_usd_df) > 0:
-                self.print_and_log(f"⚠️ Found {len(non_usd_df)} non-USD transactions in {sheet_name}")
-                
-                # Store non-USD transactions for the separate tab
-                for _, row in non_usd_df.iterrows():
-                    non_usd_data = {
-                        'Journal ID': str(row.get('Transaction Id', '')),
-                        'Type': str(row.get('Transaction Type', '')),
-                        'Journal Entry Description': str(row.get('Doc/Ref No', '')),
-                        'Posted Date': row.get('Transaction Date', ''),
-                        'Account ID': str(row.get('Account Id', '')),
-                        'Journal Line Description': str(row.get('Memo', '')),
-                        'Name': str(row.get('Relationship Name', '')),
-                        'Debit Amount': float(row.get('Debit', 0)),
-                        'Credit Amount': float(row.get('Credit', 0)),
-                        'Transaction Currency': str(row.get('Transaction Currency', ''))
-                    }
-                    self.non_usd_transactions.append(non_usd_data)
-                
-                # Remove non-USD transactions from the main dataframe
-                df.drop(non_usd_df.index, inplace=True)
-                self.print_and_log(f"INFO: Removed {len(non_usd_df)} non-USD transactions from {sheet_name}. Remaining transactions: {len(df)}")
-            else:
-                self.print_and_log(f"INFO: All transactions in {sheet_name} are USD.")
+            # Remove non-USD transactions from the main dataframe
+            df.drop(non_usd_df.index, inplace=True)
+            self.print_and_log(f"INFO: Removed {len(non_usd_df)} non-USD transactions from {sheet_name}. Remaining transactions: {len(df)}")
         else:
-            self.print_and_log(f"INFO: Presentation currency is USD, including all transactions in main output for {sheet_name}")
+            self.print_and_log(f"INFO: All transactions in {sheet_name} are USD.")
 
     def _process_date_columns(self, df, sheet_name):
         """Process and validate date columns in the DataFrame"""
@@ -1446,7 +1516,7 @@ class StrongboxParser:
             
             # Write headers
             je_sheet.append(['Required', 'Optional', 'Optional', 'Required', 'Required', 'Required', 'Optional', 'Required', 'Required'])
-            je_sheet.append(['Journal ID', 'Type', 'Journal Entry Description', 'Posted Date', 'Account ID', 'Journal Line Description', 'Name', 'Debit Amount', 'Credit Amount'])
+            je_sheet.append(list(journal_entries.columns))
             
             # Style row 1 headers (Required/Optional)
             required_cols = [1, 4, 5, 6, 8, 9]  # Columns A, D, E, F, H, I
@@ -1472,56 +1542,26 @@ class StrongboxParser:
                 cell.alignment = styles['center_alignment']
             
             # Write journal entries data with error handling
-            row_idx = 3  # Start after headers
-            chunk_size = 1000  # Process in chunks to avoid memory issues
-            total_rows = len(journal_entries)
-            chunks_processed = 0
-            
-            # Process the DataFrame in chunks
-            for chunk_start in range(0, total_rows, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, total_rows)
-                chunk = journal_entries.iloc[chunk_start:chunk_end]
-                
-                for _, row in chunk.iterrows():
+            for _, row in journal_entries.iterrows():
+                row_values = []
+                for col in journal_entries.columns:
+                    value = row[col]
                     try:
-                        # Convert row values to appropriate types
-                        values = [
-                            str(row['Journal ID']),
-                            str(row['Type']),
-                            str(row['Journal Entry Description']),
-                            row['Posted Date'],  # Keep as datetime for formatting
-                            str(row['Account ID']),
-                            str(row['Journal Line Description']),
-                            str(row['Name']),
-                            float(row['Debit Amount']),
-                            float(row['Credit Amount'])
-                        ]
-                        
-                        # Write values to cells
-                        for col_idx, value in enumerate(values, 1):
-                            cell = je_sheet.cell(row=row_idx, column=col_idx)
-                            cell.value = value
-                            
-                            # Apply date formatting to Posted Date column
-                            if col_idx == 4:  # Posted Date column
-                                cell.number_format = 'M/D/YYYY'
-                            
-                            # Apply number formatting to Debit/Credit columns
-                            elif col_idx in [8, 9]:  # Debit/Credit columns
-                                cell.number_format = '#,##0.00'
-                        
-                        row_idx += 1
-                        
-                    except Exception as e:
-                        self.print_and_log(f"Error writing row {row_idx}: {str(e)}")
-                        continue
-                
-                chunks_processed += 1
-                if chunks_processed % 10 == 0:  # Log progress every 10 chunks
-                    self.print_and_log(f"  • Processed {chunk_end} of {total_rows} rows in {sheet_title}")
+                        # Double-check the value is clean
+                        if isinstance(value, str) and len(value) > 1000:
+                            value = value[:1000]
+                        row_values.append(value)
+                    except:
+                        row_values.append("ERROR")
+                je_sheet.append(row_values)
+            
+            # Apply date formatting to column D (Posted Date) in Journal Entries & Lines
+            for row_num in range(3, je_sheet.max_row + 1):  # Start from row 3 (after headers)
+                cell = je_sheet.cell(row=row_num, column=4)
+                cell.number_format = 'M/D/YYYY'
             
             created_sheets.append(je_sheet)
-            self.print_and_log(f"Created sheet '{sheet_title}' from {sheet_name} with {row_idx-2} transactions")
+            self.print_and_log(f"Created sheet '{sheet_title}' from {sheet_name}")
         
         return created_sheets
 
@@ -1614,45 +1654,40 @@ class StrongboxParser:
         if account_data is None or account_data.empty:
             return 0.0, 0.0
 
-        # Get all available fiscal months for this account and sort them
-        fiscal_months = []
-        balances_by_month = {}
-        
+        begin_balance = 0.0
+        end_balance = 0.0
+
+        # Find balances matching our target dates
         for _, row in account_data.iterrows():
             try:
+                # Column A (index 0) should contain fiscal month
                 fiscal_month_val = row.iloc[0]
                 if pd.isna(fiscal_month_val):
                     continue
+
+                # Try to parse the fiscal month date
                 fiscal_month = pd.to_datetime(fiscal_month_val)
-                starting_balance = row.iloc[4] if len(row) > 4 else 0.0
-                ending_balance = row.iloc[6] if len(row) > 6 else 0.0
-                try:
-                    starting_balance = float(starting_balance) if pd.notna(starting_balance) else 0.0
-                except (ValueError, TypeError):
-                    starting_balance = 0.0
-                try:
-                    ending_balance = float(ending_balance) if pd.notna(ending_balance) else 0.0
-                except (ValueError, TypeError):
-                    ending_balance = 0.0
-                fiscal_months.append(fiscal_month)
-                balances_by_month[fiscal_month] = {
-                    'start': starting_balance,
-                    'end': ending_balance
-                }
+
+                # Column G (index 6) is Ending Account Balance
+                ending_balance_val = row.iloc[6] if len(row) > 6 else 0.0
+                ending_balance = 0.0
+                if pd.notna(ending_balance_val):
+                    try:
+                        ending_balance = float(ending_balance_val)
+                    except (ValueError, TypeError):
+                        ending_balance = 0.0
+
+                # Check if fiscal month matches our target dates
+                # Both beginning and ending balance use Ending Account Balance
+                if fiscal_month.date() == begin_date.date():
+                    begin_balance = ending_balance
+
+                if fiscal_month.date() == end_date.date():
+                    end_balance = ending_balance
+
             except Exception:
                 continue
 
-        if not fiscal_months:
-            return 0.0, 0.0
-
-        # Sort the fiscal months
-        fiscal_months.sort()
-
-        # Always use the earliest for beginning, latest for ending
-        begin_fiscal_month = fiscal_months[0]
-        end_fiscal_month = fiscal_months[-1]
-        begin_balance = balances_by_month[begin_fiscal_month]['start']
-        end_balance = balances_by_month[end_fiscal_month]['end']
         return begin_balance, end_balance
 
 if __name__ == "__main__":
