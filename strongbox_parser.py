@@ -97,15 +97,7 @@ class StrongboxParser:
             self.print_and_log(f'📅 Date range: {self.start_date.strftime("%Y-%m-%d")} to {self.end_date.strftime("%Y-%m-%d")}')
             self.print_and_log(f'📅 Found {len(date_columns)} valid dates in TB sheet')
 
-            # Print the TB sheet date row using openpyxl for debugging
-            wb = openpyxl.load_workbook(self.source_file, data_only=True, read_only=True)
-            tb_sheet = wb['TB']
-            date_row_idx = 4  # 1-based index for openpyxl (row 4 is the date row)
-            date_row_values = [tb_sheet.cell(row=date_row_idx, column=col_idx).value for col_idx in range(1, tb_sheet.max_column + 1)]
-            self.print_and_log(f"DEBUG: TB sheet date row (row 4):")
-            for idx, val in enumerate(date_row_values):
-                self.print_and_log(f"  Col {idx+1}: {val}")
-            wb.close()
+
 
             return date_columns
 
@@ -321,6 +313,8 @@ class StrongboxParser:
 
             # Load trial balance data using openpyxl
             tb_data = self.load_trial_balance_data()
+            self.print_and_log(f"Storing TB data in source_data. Shape: {tb_data.shape if tb_data is not None else 'None'}")
+            self.print_and_log(f"TB data columns: {tb_data.columns.tolist() if tb_data is not None and not tb_data.empty else 'No columns'}")
             self.source_data['TB'] = tb_data
 
         except Exception as e:
@@ -359,7 +353,9 @@ class StrongboxParser:
         if closest_end_date is None:
             closest_end_date = available_tb_dates[-1]
 
-        return self._extract_trial_balance_data(date_columns, closest_begin_date, closest_end_date)
+        tb_result = self._extract_trial_balance_data(date_columns, closest_begin_date, closest_end_date)
+        self.print_and_log(f"load_trial_balance_data() completed. Result shape: {tb_result.shape if tb_result is not None else 'None'}")
+        return tb_result
 
     def create_journal_entries(self):
         """Create Journal Entries & Lines tabs"""
@@ -400,12 +396,44 @@ class StrongboxParser:
                 
                 # Create the required columns
                 self.print_and_log("Creating required columns...")
+                
+                # Determine Account ID to use: Account Number/Code if available, otherwise Account Name
+                account_ids = []
+                for _, row in df_copy.iterrows():
+                    account_number_code = None
+                    account_name = None
+                    
+                    # Check if Account Number/Code column exists and get its value
+                    if 'Account Number/Code' in df_copy.columns:
+                        account_number_code = row.get('Account Number/Code')
+                    elif 'Account Number' in df_copy.columns:
+                        account_number_code = row.get('Account Number')
+                    elif 'Account Code' in df_copy.columns:
+                        account_number_code = row.get('Account Code')
+                    
+                    # Get Account Name as fallback
+                    if 'Account Name' in df_copy.columns:
+                        account_name = row.get('Account Name')
+                    
+                    # Use Account Number/Code if available and not blank, otherwise use Account Name
+                    if account_number_code is not None and str(account_number_code).strip() and str(account_number_code).strip().lower() != 'nan':
+                        account_ids.append(str(account_number_code).strip())
+                    elif account_name is not None and str(account_name).strip() and str(account_name).strip().lower() != 'nan':
+                        account_ids.append(str(account_name).strip())
+                    else:
+                        # Fallback to original Account Id if neither is available, but avoid 'nan'
+                        original_account_id = str(row.get('Account Id', ''))
+                        if original_account_id.lower() != 'nan':
+                            account_ids.append(original_account_id)
+                        else:
+                            account_ids.append('')  # Use empty string instead of 'nan'
+                
                 processed_df = pd.DataFrame({
                     'Journal ID': df_copy['Transaction Id'],
                     'Type': df_copy['Transaction Type'],
                     'Journal Entry Description': df_copy['Doc/Ref No'],
                     'Posted Date': df_copy['Transaction Date'],
-                    'Account ID': df_copy['Account Id'],
+                    'Account ID': account_ids,
                     'Journal Line Description': df_copy['Memo'],
                     'Name': df_copy['Relationship Name'],
                     'Debit Amount': df_copy['Debit'],
@@ -443,8 +471,18 @@ class StrongboxParser:
         tb_data_data = self.source_data.get('TB-DATA')
 
         # Only filter out exact header matches, not all rows containing "account"
-        tb_data = tb_data[~((tb_data['Account Id'].str.lower() == "account id") | 
-                           (tb_data['Account Id'].str.lower() == "account"))]
+        if not tb_data.empty and 'Account Id' in tb_data.columns:
+            # Convert to string first to handle any non-string values
+            tb_data['Account Id'] = tb_data['Account Id'].astype(str)
+            tb_data = tb_data[~((tb_data['Account Id'].str.lower() == "account id") | 
+                               (tb_data['Account Id'].str.lower() == "account"))]
+        else:
+            self.print_and_log("⚠️ Warning: TB data is empty or missing 'Account Id' column")
+            self.print_and_log(f"TB data columns: {tb_data.columns.tolist() if not tb_data.empty else 'DataFrame is empty'}")
+            self.print_and_log(f"TB data shape: {tb_data.shape}")
+            if not tb_data.empty:
+                self.print_and_log("First few rows of TB data:")
+                self.print_and_log(tb_data.head())
 
         # Get the earliest and latest TB dates from the TB sheet's date row
         tb_dates = sorted(self.date_columns.keys())
@@ -468,22 +506,38 @@ class StrongboxParser:
 
         begin_balances = []
         end_balances = []
-        for acc_id in tb_data['Account Id']:
-            acc_id_str = str(acc_id)
-            begin_bal = tbdata_lookup.get((acc_id_str, begin_tb_date), 0.0)
-            end_bal = tbdata_lookup.get((acc_id_str, end_tb_date), 0.0)
-            begin_balances.append(begin_bal)
-            end_balances.append(end_bal)
+        if not tb_data.empty and 'Account Id' in tb_data.columns and 'Original Account Id' in tb_data.columns:
+            for i, (display_id, original_id) in enumerate(zip(tb_data['Account Id'], tb_data['Original Account Id'])):
+                original_id_str = str(original_id)
+                begin_bal = tbdata_lookup.get((original_id_str, begin_tb_date), 0.0)
+                end_bal = tbdata_lookup.get((original_id_str, end_tb_date), 0.0)
+                begin_balances.append(begin_bal)
+                end_balances.append(end_bal)
+        else:
+            self.print_and_log("⚠️ Warning: Cannot process balances - TB data is empty or missing required columns")
 
-        trial_balance = pd.DataFrame({
-            'Account ID': tb_data['Account Id'],
-            'Account Name': tb_data['Account Name'],
-            'Beginning Balance \n(Prior Period Balance)': begin_balances,
-            'Ending Balance': end_balances,
-            'Account Type \n(see Mapping Categories tab)': '',
-            'Account Mapping \n(see Mapping Categories tab)': '',
-            'Account Description': tb_data['Financial Statement Classification']
-        })
+        if not tb_data.empty and 'Account Id' in tb_data.columns:
+            trial_balance = pd.DataFrame({
+                'Account ID': tb_data['Account Id'],
+                'Account Name': tb_data['Account Name'] if 'Account Name' in tb_data.columns else [''] * len(tb_data),
+                'Beginning Balance \n(Prior Period Balance)': begin_balances,
+                'Ending Balance': end_balances,
+                'Account Type \n(see Mapping Categories tab)': [''] * len(tb_data),
+                'Account Mapping \n(see Mapping Categories tab)': [''] * len(tb_data),
+                'Account Description': tb_data['Financial Statement Classification'] if 'Financial Statement Classification' in tb_data.columns else [''] * len(tb_data)
+            })
+        else:
+            # Create empty trial balance if no data
+            self.print_and_log("⚠️ Creating empty trial balance due to missing data")
+            trial_balance = pd.DataFrame({
+                'Account ID': [],
+                'Account Name': [],
+                'Beginning Balance \n(Prior Period Balance)': [],
+                'Ending Balance': [],
+                'Account Type \n(see Mapping Categories tab)': [],
+                'Account Mapping \n(see Mapping Categories tab)': [],
+                'Account Description': []
+            })
 
         # Apply the class method to populate the Account Type column
         trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
@@ -499,26 +553,7 @@ class StrongboxParser:
         unclassified_count = (trial_balance[account_type_col] == '').sum()
         self.print_and_log(f"  Unclassified: {unclassified_count} accounts")
 
-        # Debug info
-        self.print_and_log("\nTrial Balance DataFrame - first few rows:")
-        self.print_and_log(f"Column names: {trial_balance.columns.tolist()}")
-        self.print_and_log("First 5 rows:")
-        self.print_and_log(trial_balance.head(5))
-        self.print_and_log(f"Total rows in trial balance: {len(trial_balance)}")
 
-        # Calculate sum of beginning and ending balances
-        begin_sum = trial_balance['Beginning Balance \n(Prior Period Balance)'].sum()
-        end_sum = trial_balance['Ending Balance'].sum()
-        self.print_and_log(f"Sum of Beginning Balances: {begin_sum}")
-        self.print_and_log(f"Sum of Ending Balances: {end_sum}")
-
-        # Show a few sample balances to verify they're being set correctly
-        self.print_and_log("\nSample balance values from trial balance:")
-        for idx in range(min(5, len(trial_balance))):
-            account_id = trial_balance.at[idx, 'Account ID']
-            begin_bal = trial_balance.at[idx, 'Beginning Balance \n(Prior Period Balance)']
-            end_bal = trial_balance.at[idx, 'Ending Balance']
-            self.print_and_log(f"Account {account_id}: Begin={begin_bal}, End={end_bal}")
 
         # Only remove rows that are definitely headers (contain exactly "Account ID")
         headers_to_remove = []
@@ -1045,12 +1080,41 @@ class StrongboxParser:
                 
                 # Store non-USD transactions for the separate tab
                 for _, row in non_usd_df.iterrows():
+                    # Determine Account ID to use: Account Number/Code if available, otherwise Account Name
+                    account_number_code = None
+                    account_name = None
+                    
+                    # Check if Account Number/Code column exists and get its value
+                    if 'Account Number/Code' in df.columns:
+                        account_number_code = row.get('Account Number/Code')
+                    elif 'Account Number' in df.columns:
+                        account_number_code = row.get('Account Number')
+                    elif 'Account Code' in df.columns:
+                        account_number_code = row.get('Account Code')
+                    
+                    # Get Account Name as fallback
+                    if 'Account Name' in df.columns:
+                        account_name = row.get('Account Name')
+                    
+                    # Use Account Number/Code if available and not blank, otherwise use Account Name
+                    if account_number_code is not None and str(account_number_code).strip() and str(account_number_code).strip().lower() != 'nan':
+                        account_id = str(account_number_code).strip()
+                    elif account_name is not None and str(account_name).strip() and str(account_name).strip().lower() != 'nan':
+                        account_id = str(account_name).strip()
+                    else:
+                        # Fallback to original Account Id if neither is available, but avoid 'nan'
+                        original_account_id = str(row.get('Account Id', ''))
+                        if original_account_id.lower() != 'nan':
+                            account_id = original_account_id
+                        else:
+                            account_id = ''  # Use empty string instead of 'nan'
+                    
                     non_usd_data = {
                         'Journal ID': str(row.get('Transaction Id', '')),
                         'Type': str(row.get('Transaction Type', '')),
                         'Journal Entry Description': str(row.get('Doc/Ref No', '')),
                         'Posted Date': row.get('Transaction Date', ''),
-                        'Account ID': str(row.get('Account Id', '')),
+                        'Account ID': account_id,
                         'Journal Line Description': str(row.get('Memo', '')),
                         'Name': str(row.get('Relationship Name', '')),
                         'Debit Amount': float(row.get('Debit', 0)),
@@ -1255,69 +1319,65 @@ class StrongboxParser:
             for row_idx in range(8, max_row_to_process + 1):
                 rows_processed += 1
                 
-                # Update progress every 100 rows
-                if rows_processed % 100 == 0:
-                    self.print_and_log(f"Processed {rows_processed} rows...")
+                # Update progress every 1000 rows
+                if rows_processed % 1000 == 0:
                     progress = 58 + (rows_processed / max_row_to_process) * 10  # 58-68%
-                    self.update_status(f"Processing TB row {rows_processed}...", progress)
+                    self.update_status(f"Processing TB rows... ({rows_processed}/{max_row_to_process})", progress)
                 
                 try:
-                    account_id = tb_sheet.cell(row=row_idx, column=4).value
-                    if account_id is not None:
-                        account_id = str(account_id).strip()
-                        # Only skip rows with exact header matches, not all rows containing "account"
-                        if account_id.lower() == "account id" or account_id.lower() == "account":
-                            if rows_processed <= 20:  # Only print for first 20 rows to avoid spam
-                                self.print_and_log(f"Skipping header row {row_idx} with account_id: {account_id}")
-                            continue
-                            
-                        account_name = tb_sheet.cell(row=row_idx, column=6).value
-                        begin_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_begin_date] + 1)
-                        end_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_end_date] + 1)
+                    # Get Account Number/Code from column 5, fallback to Account Name from column 6
+                    account_number_code = tb_sheet.cell(row=row_idx, column=5).value
+                    account_name = tb_sheet.cell(row=row_idx, column=6).value
+                    
+                    # Get the original Account ID from column 4 (needed for TB-DATA lookup)
+                    original_account_id = tb_sheet.cell(row=row_idx, column=4).value
+                    
+                    # Use Account Number/Code if available, otherwise use Account Name for DISPLAY
+                    if account_number_code is not None and str(account_number_code).strip():
+                        display_account_id = str(account_number_code).strip()
+                    elif account_name is not None and str(account_name).strip():
+                        display_account_id = str(account_name).strip()
+                    else:
+                        # Skip rows with no account identifier
+                        continue
+                    
+                    # Skip if original Account ID is also missing (needed for TB-DATA lookup)
+                    if original_account_id is None:
+                        continue
+                    
+                    original_account_id = str(original_account_id).strip()
+                    
+                    # Only skip rows with exact header matches, including the new header format
+                    if display_account_id.lower() in ['account id', 'account', 'account number/code']:
+                        continue
                         
-                        # Get Financial Statement Classification using the identified column
-                        fin_statement_class = tb_sheet.cell(row=row_idx, column=fin_statement_col).value
-                        
-                        # Debug output for Financial Statement Classification for the first few rows
-                        if row_idx < 12:
-                            self.print_and_log(f"Row {row_idx}, Account: {account_id}, Financial Statement Classification (Column {fin_statement_col}): {fin_statement_class}")
-                        
-                        # Handle different types appropriately
-                        if fin_statement_class is None:
-                            fin_statement_class = ''
-                        else:
-                            fin_statement_class = str(fin_statement_class).strip()
-                        
-                        try:
-                            begin_balance = float(begin_cell.value) if begin_cell.value is not None else 0.0
-                        except (ValueError, TypeError):
-                            begin_balance = 0.0
-                            
-                        try:
-                            end_balance = float(end_cell.value) if end_cell.value is not None else 0.0
-                        except (ValueError, TypeError):
-                            end_balance = 0.0
-                        
-                        data.append({
-                            'Account Id': account_id,
-                            'Account Name': str(account_name).strip() if account_name is not None else '',
-                            'Beginning Balance': begin_balance,
-                            'Ending Balance': end_balance,
-                            'Financial Statement Classification': fin_statement_class
-                        })
+                    begin_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_begin_date] + 1)
+                    end_cell = tb_sheet.cell(row=row_idx, column=date_columns[closest_end_date] + 1)
+                    
+                    # Get Financial Statement Classification using the identified column
+                    fin_statement_class = tb_sheet.cell(row=row_idx, column=fin_statement_col).value
+                    
+                    
+                    # Handle different types appropriately
+                    if fin_statement_class is None:
+                        fin_statement_class = ''
+                    else:
+                        fin_statement_class = str(fin_statement_class).strip()
+                    
+                    data.append({
+                        'Account Id': display_account_id,  # For display in output
+                        'Original Account Id': original_account_id,  # For TB-DATA lookup
+                        'Account Name': str(account_name).strip() if account_name is not None else '',
+                        'Beginning Balance': 0.0,  # Will be populated from TB-DATA in trial balance creation
+                        'Ending Balance': 0.0,     # Will be populated from TB-DATA in trial balance creation
+                        'Financial Statement Classification': fin_statement_class
+                    })
                 except Exception as e:
-                    if rows_processed <= 20:  # Only print errors for first 20 rows to avoid spam
-                        self.print_and_log(f"Error processing TB sheet row {row_idx}: {str(e)}. Skipping row.")
                     continue
-            
-            self.print_and_log(f"Completed processing {rows_processed} rows from TB sheet")
-            self.print_and_log(f"Extracted {len(data)} valid account records")
-            self.update_status("Converting TB data to DataFrame...", 68)
             
             # Convert to DataFrame
             tb_data = pd.DataFrame(data)
-            self.print_and_log("\nFirst few rows of TB data:")
-            self.print_and_log(tb_data.head())
+            self.print_and_log(f"✅ Extracted {len(data)} account records from TB sheet")
             
             return tb_data
             
