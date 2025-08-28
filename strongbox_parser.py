@@ -259,8 +259,15 @@ class StrongboxParser:
             # Process TXN sheets using pandas for better performance with large datasets
             for sheet_name in txn_sheets:
                 try:
-                    # Read the sheet with pandas
-                    df = pd.read_excel(self.source_file, sheet_name=sheet_name)
+                    # Read the sheet with pandas, forcing account-related columns to be strings
+                    # to preserve exact format (prevent 1016 -> 1016.0 conversion)
+                    dtype_dict = {
+                        'Account Id': str,
+                        'Account Number/Code': str, 
+                        'Account Number': str,
+                        'Account Code': str
+                    }
+                    df = pd.read_excel(self.source_file, sheet_name=sheet_name, dtype=dtype_dict)
                     
                     # Filter by date range if needed
                     if self.start_date is not None and self.end_date is not None and 'Fiscal Month' in df.columns:
@@ -270,7 +277,7 @@ class StrongboxParser:
                     if not df.empty:
                         # Clean and convert data types
                         df['Transaction Id'] = df['Transaction Id'].astype(str)
-                        df['Account Id'] = df['Account Id'].astype(str)
+                        # Account Id is already a string from dtype specification
                         df['Memo'] = df['Memo'].fillna('')
                         df['Doc/Ref No'] = df['Doc/Ref No'].fillna('')
                         df['Transaction Type'] = df['Transaction Type'].fillna('')
@@ -380,7 +387,7 @@ class StrongboxParser:
                 df_copy['Transaction Id'] = df_copy['Transaction Id'].astype(str)
                 df_copy['Memo'] = df_copy['Memo'].fillna('')
                 df_copy['Doc/Ref No'] = df_copy['Doc/Ref No'].fillna('')
-                df_copy['Account Id'] = df_copy['Account Id'].astype(str)
+                # Account Id is already a string from dtype specification
                 
                 # Handle optional columns
                 for col in ['Transaction Type', 'Relationship Name']:
@@ -398,6 +405,7 @@ class StrongboxParser:
                 self.print_and_log("Creating required columns...")
                 
                 # Determine Account ID to use: Account Number/Code if available, otherwise Account Name
+                # Preserve exact format from input file - don't modify the values
                 account_ids = []
                 for _, row in df_copy.iterrows():
                     account_number_code = None
@@ -416,14 +424,15 @@ class StrongboxParser:
                         account_name = row.get('Account Name')
                     
                     # Use Account Number/Code if available and not blank, otherwise use Account Name
+                    # Preserve original format - just convert to string and check for validity
                     if account_number_code is not None and str(account_number_code).strip() and str(account_number_code).strip().lower() != 'nan':
                         account_ids.append(str(account_number_code).strip())
                     elif account_name is not None and str(account_name).strip() and str(account_name).strip().lower() != 'nan':
                         account_ids.append(str(account_name).strip())
                     else:
                         # Fallback to original Account Id if neither is available, but avoid 'nan'
-                        original_account_id = str(row.get('Account Id', ''))
-                        if original_account_id.lower() != 'nan':
+                        original_account_id = str(row.get('Account Id', '')).strip()
+                        if original_account_id and original_account_id.lower() != 'nan':
                             account_ids.append(original_account_id)
                         else:
                             account_ids.append('')  # Use empty string instead of 'nan'
@@ -1097,14 +1106,15 @@ class StrongboxParser:
                         account_name = row.get('Account Name')
                     
                     # Use Account Number/Code if available and not blank, otherwise use Account Name
+                    # Preserve original format - just convert to string and check for validity
                     if account_number_code is not None and str(account_number_code).strip() and str(account_number_code).strip().lower() != 'nan':
                         account_id = str(account_number_code).strip()
                     elif account_name is not None and str(account_name).strip() and str(account_name).strip().lower() != 'nan':
                         account_id = str(account_name).strip()
                     else:
                         # Fallback to original Account Id if neither is available, but avoid 'nan'
-                        original_account_id = str(row.get('Account Id', ''))
-                        if original_account_id.lower() != 'nan':
+                        original_account_id = str(row.get('Account Id', '')).strip()
+                        if original_account_id and original_account_id.lower() != 'nan':
                             account_id = original_account_id
                         else:
                             account_id = ''  # Use empty string instead of 'nan'
@@ -1333,7 +1343,8 @@ class StrongboxParser:
                     original_account_id = tb_sheet.cell(row=row_idx, column=4).value
                     
                     # Use Account Number/Code if available, otherwise use Account Name for DISPLAY
-                    if account_number_code is not None and str(account_number_code).strip():
+                    # Preserve exact format from input file - don't modify the values
+                    if account_number_code is not None and str(account_number_code).strip() and str(account_number_code).strip() != 'None':
                         display_account_id = str(account_number_code).strip()
                     elif account_name is not None and str(account_name).strip():
                         display_account_id = str(account_name).strip()
