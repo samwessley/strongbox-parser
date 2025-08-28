@@ -269,6 +269,29 @@ class StrongboxParser:
                     }
                     df = pd.read_excel(self.source_file, sheet_name=sheet_name, dtype=dtype_dict)
                     
+                    # Fix account columns to preserve exact decimal formatting (3041.3 should stay 3041.3, not 3041.30)
+                    # Remove trailing zeros from decimal account numbers
+                    def fix_decimal_formatting(value):
+                        if value is None:
+                            return ''
+                        str_value = str(value).strip()
+                        if str_value == '' or str_value.lower() == 'nan':
+                            return ''
+                        
+                        # If it contains a decimal point, remove trailing zeros
+                        if '.' in str_value:
+                            # Remove trailing zeros after decimal point
+                            str_value = str_value.rstrip('0').rstrip('.')
+                        
+                        return str_value
+                    
+                    if not df.empty:
+                        # Apply decimal formatting fix to account columns
+                        account_columns = ['Account Id', 'Account Number/Code', 'Account Number', 'Account Code']
+                        for col in account_columns:
+                            if col in df.columns:
+                                df[col] = df[col].apply(fix_decimal_formatting)
+                    
                     # Filter by date range if needed
                     if self.start_date is not None and self.end_date is not None and 'Fiscal Month' in df.columns:
                         # Include transactions on the begin_balance_date (before start_date) as they are part of the period
