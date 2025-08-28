@@ -294,8 +294,8 @@ class StrongboxParser:
                     
                     # Filter by date range if needed
                     if self.start_date is not None and self.end_date is not None and 'Fiscal Month' in df.columns:
-                        # Include transactions on the begin_balance_date (before start_date) as they are part of the period
-                        df = df[(df['Fiscal Month'] >= self.begin_balance_date) & (df['Fiscal Month'] <= self.end_date)]
+                        # Only include transactions from start_date onwards (not from begin_balance_date)
+                        df = df[(df['Fiscal Month'] >= self.start_date) & (df['Fiscal Month'] <= self.end_date)]
                     
                     if not df.empty:
                         # Clean and convert data types
