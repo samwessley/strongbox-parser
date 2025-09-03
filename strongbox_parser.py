@@ -15,6 +15,7 @@ import sys
 import re
 import warnings
 warnings.filterwarnings('ignore')
+from difflib import SequenceMatcher
 
 class StrongboxParser:
     def __init__(self):
@@ -34,6 +35,7 @@ class StrongboxParser:
         self.presentation_currency = None  # Store presentation currency from TOC tab
         self.non_usd_transactions = []  # Store non-USD transactions
         self.non_usd_headers = ['Journal ID', 'Type', 'Journal Entry Description', 'Posted Date', 'Account ID', 'Journal Line Description', 'Name', 'Debit Amount', 'Credit Amount', 'Transaction Currency']  # Headers for non-USD transactions tab
+        self.mapping_categories = {}  # Store mapping categories from Excel file
 
     def print_and_log(self, message):
         """Print to console and also log to GUI if available"""
@@ -571,8 +573,33 @@ class StrongboxParser:
                 'Account Description': []
             })
 
+        # Load mapping categories for automapping
+        self.load_mapping_categories()
+        
         # Apply the class method to populate the Account Type column
         trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
+
+        # Apply automapping to populate the Account Mapping column
+        self.print_and_log("\n🤖 Running automapper to populate Account Mapping column...")
+        account_mappings = []
+        mapped_count = 0
+        
+        for _, row in trial_balance.iterrows():
+            fs_classification = row['Account Description']
+            account_type = row['Account Type \n(see Mapping Categories tab)']
+            account_name = row['Account Name']
+            
+            if account_type and fs_classification:
+                best_mapping = self.find_best_mapping(fs_classification, account_type, account_name)
+                if best_mapping:
+                    mapped_count += 1
+                account_mappings.append(best_mapping)
+            else:
+                account_mappings.append('')
+        
+        trial_balance['Account Mapping \n(see Mapping Categories tab)'] = account_mappings
+        
+        self.print_and_log(f"✅ Automapper completed: {mapped_count} of {len(trial_balance)} accounts mapped")
 
         # Count how many accounts were classified for each type
         account_type_counts = trial_balance['Account Type \n(see Mapping Categories tab)'].value_counts()
@@ -584,6 +611,13 @@ class StrongboxParser:
         account_type_col = 'Account Type \n(see Mapping Categories tab)'
         unclassified_count = (trial_balance[account_type_col] == '').sum()
         self.print_and_log(f"  Unclassified: {unclassified_count} accounts")
+        
+        # Count mapping results
+        mapping_col = 'Account Mapping \n(see Mapping Categories tab)'
+        unmapped_count = (trial_balance[mapping_col] == '').sum()
+        self.print_and_log(f"\nAccount Mapping summary:")
+        self.print_and_log(f"  Mapped: {mapped_count} accounts")
+        self.print_and_log(f"  Unmapped: {unmapped_count} accounts")
 
 
 
@@ -785,9 +819,84 @@ class StrongboxParser:
             cell.fill = styles['dark_blue_fill']
             cell.alignment = styles['center_alignment']
         
-        # Create Mapping Categories sheet
+        # Create Mapping Categories sheet and populate with actual mapping data
         mapping_sheet = workbook.create_sheet('Mapping Categories')
-        mapping_sheet.append(['Content for Mapping Categories'])
+        self._populate_mapping_categories_sheet(mapping_sheet, styles)
+
+    def _populate_mapping_categories_sheet(self, mapping_sheet, styles):
+        """Populate the Mapping Categories sheet with the built-in mapping data"""
+        try:
+            # Create structured mapping sheet with separate columns for each account type
+            headers = [
+                'Account Type',
+                'Account Mapping ( Assets)',
+                'Account Mapping ( Liabilities)', 
+                'Account Mapping (Equity)',
+                'Account Mapping (Income)',
+                'Account Mapping (Expenses)',
+                'Unnamed: 6',
+                'Banking Currency Code'
+            ]
+            
+            mapping_sheet.append(headers)
+            
+            # Style the header row
+            for col_idx, header in enumerate(headers, 1):
+                cell = mapping_sheet.cell(row=1, column=col_idx)
+                cell.font = styles['header_font']
+                cell.fill = styles['blue_fill']
+                cell.alignment = styles['center_alignment']
+            
+            # Find the maximum number of mappings to determine row count
+            max_mappings = max(len(mappings) for mappings in self.mapping_categories.values()) if self.mapping_categories else 0
+            
+            # Create rows with account type names in first few rows, then mappings
+            account_types = ['Assets', 'Liabilities', 'Equity', 'Income', 'Expense']
+            for i, account_type in enumerate(account_types):
+                row_data = [''] * len(headers)
+                row_data[0] = account_type  # Account Type column
+                mapping_sheet.append(row_data)
+            
+            # Add mapping data in columns
+            for row_idx in range(len(account_types) + 1, max_mappings + len(account_types) + 1):
+                row_data = [''] * len(headers)
+                
+                # Add mappings for each account type in their respective columns
+                mapping_idx = row_idx - len(account_types) - 1
+                
+                if mapping_idx < len(self.mapping_categories.get('Assets', [])):
+                    row_data[1] = self.mapping_categories['Assets'][mapping_idx]  # Assets column
+                
+                if mapping_idx < len(self.mapping_categories.get('Liabilities', [])):
+                    row_data[2] = self.mapping_categories['Liabilities'][mapping_idx]  # Liabilities column
+                
+                if mapping_idx < len(self.mapping_categories.get('Equity', [])):
+                    row_data[3] = self.mapping_categories['Equity'][mapping_idx]  # Equity column
+                
+                if mapping_idx < len(self.mapping_categories.get('Income', [])):
+                    row_data[4] = self.mapping_categories['Income'][mapping_idx]  # Income column
+                
+                if mapping_idx < len(self.mapping_categories.get('Expense', [])):
+                    row_data[5] = self.mapping_categories['Expense'][mapping_idx]  # Expenses column
+                
+                mapping_sheet.append(row_data)
+            
+            # Set column widths
+            mapping_sheet.column_dimensions['A'].width = 20  # Account Type
+            for col in ['B', 'C', 'D', 'E', 'F']:  # Mapping columns
+                mapping_sheet.column_dimensions[col].width = 40
+            
+            self.print_and_log("✅ Mapping Categories sheet populated with built-in mapping data")
+                
+        except Exception as e:
+            self.print_and_log(f"⚠️ Error populating Mapping Categories sheet: {str(e)}")
+            # Create a minimal sheet
+            mapping_sheet.append(['Account Type', 'Account Mapping'])
+            for col in range(1, 3):
+                cell = mapping_sheet.cell(row=1, column=col)
+                cell.font = styles['header_font']
+                cell.fill = styles['blue_fill']
+                cell.alignment = styles['center_alignment']
 
     def _handle_excel_creation_error(self, e, output_file, trial_balance, journal_entries_dict):
         """Handle errors during Excel file creation"""
@@ -1019,6 +1128,346 @@ class StrongboxParser:
         except Exception as e:
             self.update_status(f"Error: {str(e)}", 0)
             messagebox.showerror("Error", str(e))
+
+    def load_mapping_categories(self):
+        """Load built-in mapping categories for automapping"""
+        self.print_and_log("📋 Loading built-in mapping categories for automapping...")
+        
+        # Built-in mapping categories - these are the standard options for each account type
+        self.mapping_categories = {
+            "Assets": [
+                "asset:current:cash",
+                "asset:current:undepositedFunds",
+                "asset:current:cashNonBankAccounts",
+                "asset:current:cashDepositsandInvestments",
+                "asset:current:investments",
+                "asset:current:accountsReceivable",
+                "asset:current:accountsReceivable:allowanceforDoubtfulAccounts",
+                "asset:current:inventory",
+                "asset:current:prepaidExpenses",
+                "asset:current:interCompany",
+                "asset:current:other",
+                "asset:nonCurrent:fixed",
+                "asset:nonCurrent:intangibles",
+                "asset:nonCurrent:goodwill",
+                "asset:nonCurrent:deposits",
+                "asset:nonCurrent:interCompany",
+                "asset:nonCurrent:other",
+            ],
+            "Liabilities": [
+                "liability:current:accountsPayable",
+                "liability:current:creditCardPayable",
+                "liability:current:interCompany",
+                "liability:current:payrollLiability",
+                "liability:current:salesTax",
+                "liability:current:tax",
+                "liability:current:other:accrued",
+                "liability:current:other",
+                "liability:current:other:deferredRevenue",
+                "liability:current:other:customerDeposits",
+                "liability:current:other:billingsInExcessOfCost",
+                "liability:current:debt",
+                "liability:noncurrent:debt",
+                "liability:noncurrent:tax",
+                "liability:noncurrent:interCompany",
+                "liability:noncurrent:other",
+            ],
+            "Equity": [
+                "equity:ownersEquity",
+                "equity:retainedEarnings",
+                "equity:netIncome",
+            ],
+            "Income": [
+                "income:operating",
+                "income:nonOperating",
+            ],
+            "Expense": [
+                "expense:costOfGoodsSold",
+                "expense:costOfGoodsSold:labor",
+                "expense:costOfGoodsSold:materials",
+                "expense:costOfGoodsSold:other",
+                "expense:operating",
+                "expense:operating:advertisingAndMarketing",
+                "expense:operating:amortization",
+                "expense:operating:bankAndCreditCardFees",
+                "expense:operating:depreciation",
+                "expense:operating:legalAndProfessionalFees",
+                "expense:operating:mealsAndEntertainment",
+                "expense:operating:office",
+                "expense:operating:payroll",
+                "expense:operating:rent",
+                "expense:operating:software",
+                "expense:operating:travel",
+                "expense:operating:other",
+                "expense:nonOperating",
+                "expense:nonOperating:interest",
+                "expense:nonOperating:taxes",
+            ],
+        }
+        
+        self.print_and_log(f"✅ Loaded built-in mapping categories:")
+        for account_type, mappings in self.mapping_categories.items():
+            self.print_and_log(f"  • {account_type}: {len(mappings)} options")
+
+    def find_best_mapping(self, fs_classification, account_type, account_name=''):
+        """Find the best mapping option based on Financial Statement Classification Path, Account Type, and Account Name"""
+        if not self.mapping_categories or account_type not in self.mapping_categories:
+            return ''
+        
+        if pd.isna(fs_classification) or fs_classification == '':
+            return ''
+        
+        fs_classification = str(fs_classification).strip().lower()
+        account_name = str(account_name).strip().lower() if account_name else ''
+        available_mappings = self.mapping_categories[account_type]
+        
+        if not available_mappings:
+            return ''
+        
+        # Extract keywords from both financial statement classification and account name
+        fs_keywords = self._extract_keywords(fs_classification)
+        name_keywords = self._extract_keywords(account_name) if account_name else []
+        
+        # Combine keywords, giving more weight to account name keywords
+        all_keywords = fs_keywords + name_keywords
+        
+        best_match = ''
+        best_score = 0.0
+        
+        for mapping in available_mappings:
+            mapping_lower = mapping.lower()
+            score = self._calculate_mapping_score(fs_keywords, name_keywords, mapping_lower, fs_classification, account_name)
+            
+            if score > best_score:
+                best_score = score
+                best_match = mapping
+        
+        # Apply default mappings if no good match found
+        if best_score <= 0.1:
+            default_mapping = self._get_default_mapping(fs_classification, account_name, account_type)
+            if default_mapping:
+                return default_mapping
+        
+        # Only return a match if the score is above a threshold
+        if best_score > 0.1:  # Minimum 10% match
+            return best_match
+        
+        return ''
+
+    def _extract_keywords(self, fs_classification):
+        """Extract meaningful keywords from Financial Statement Classification Path"""
+        # Remove common path separators and words
+        text = fs_classification.replace('→', ' ').replace('total', '').replace('net', '')
+        
+        # Split into words and filter out common words
+        words = re.findall(r'\b\w+\b', text.lower())
+        
+        # Filter out very common words that don't help with classification
+        stop_words = {'and', 'or', 'the', 'of', 'in', 'to', 'for', 'with', 'by', 'from', 'on', 'at', 'as'}
+        keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+        
+        return keywords
+
+    def _calculate_mapping_score(self, fs_keywords, name_keywords, mapping_lower, fs_classification, account_name):
+        """Calculate a score for how well a mapping matches the financial statement classification and account name"""
+        score = 0.0
+        
+        # Direct keyword matches from financial statement classification
+        for keyword in fs_keywords:
+            if keyword in mapping_lower:
+                score += 1.0
+        
+        # Direct keyword matches from account name (higher weight)
+        for keyword in name_keywords:
+            if keyword in mapping_lower:
+                score += 1.5  # Account name gets higher priority
+        
+        # Partial matches using SequenceMatcher
+        fs_similarity = SequenceMatcher(None, fs_classification, mapping_lower).ratio()
+        score += fs_similarity * 0.5
+        
+        if account_name:
+            name_similarity = SequenceMatcher(None, account_name, mapping_lower).ratio()
+            score += name_similarity * 0.7  # Account name similarity gets higher weight
+        
+        # Specific business logic mappings
+        score += self._apply_business_logic_scoring(fs_keywords, name_keywords, mapping_lower, fs_classification, account_name)
+        
+        return score
+
+    def _apply_business_logic_scoring(self, fs_keywords, name_keywords, mapping_lower, fs_classification, account_name):
+        """Apply business logic for specific account type mappings"""
+        score = 0.0
+        all_keywords = fs_keywords + name_keywords
+        combined_text = f"{fs_classification} {account_name}".lower()
+        
+        # Cash-related mappings - bank accounts should map to asset:current:cash
+        if any(word in all_keywords for word in ['cash', 'bank', 'checking', 'savings']):
+            if mapping_lower == 'asset:current:cash':
+                score += 5.0  # Higher priority for basic cash mapping
+            elif 'cashnonbankaccounts' in mapping_lower.replace(':', ''):
+                score -= 2.0  # Strong penalty for non-bank cash accounts when bank terms are present
+            elif 'cash' in mapping_lower:
+                score += 1.0  # Lower score for other cash mappings
+        
+        # Specifically for bank accounts - boost basic cash mapping
+        if any(word in all_keywords for word in ['bank']) and 'accounts' in combined_text:
+            if mapping_lower == 'asset:current:cash':
+                score += 3.0  # Extra boost for bank accounts -> basic cash
+        
+        # Accounts receivable
+        if any(word in all_keywords for word in ['receivable', 'receivables', 'ar']):
+            if 'accountsreceivable' in mapping_lower.replace(':', ''):
+                score += 2.0
+        
+        # Accounts payable
+        if any(word in all_keywords for word in ['payable', 'payables', 'ap']):
+            if 'accountspayable' in mapping_lower.replace(':', ''):
+                score += 2.0
+        
+        # Inventory
+        if 'inventory' in all_keywords:
+            if 'inventory' in mapping_lower:
+                score += 2.0
+        
+        # Fixed assets and depreciation - improved logic
+        if any(word in all_keywords for word in ['fixed', 'equipment', 'property', 'plant', 'depreciation', 'depletion', 'amortization', 'impairment']):
+            if 'fixed' in mapping_lower:
+                score += 2.0
+        
+        # Other current assets
+        if 'other' in combined_text and 'current' in combined_text and 'assets' in combined_text:
+            if mapping_lower == 'asset:current:other':
+                score += 3.0
+        
+        # Other current liabilities
+        if 'other' in combined_text and 'current' in combined_text and 'liabilities' in combined_text:
+            if mapping_lower == 'liability:current:other':
+                score += 3.0
+        
+        # Credit card debt mapping
+        if any(word in all_keywords for word in ['credit', 'card']):
+            if mapping_lower == 'liability:current:creditcardpayable':
+                score += 3.0
+        
+        # Payroll liabilities mapping
+        if any(word in all_keywords for word in ['payroll']) and any(word in all_keywords for word in ['liabilities', 'liability']):
+            if mapping_lower == 'liability:current:payrollliability':
+                score += 3.0
+        
+        # Term loans mapping
+        if 'term' in all_keywords and any(word in all_keywords for word in ['loan', 'loans']):
+            if mapping_lower == 'liability:noncurrent:debt':
+                score += 3.0
+        
+        # Debt mappings - improved specificity
+        debt_keywords = ['loan', 'debt', 'note', 'borrowing', 'shrhlder', 'shareholder']
+        if any(word in all_keywords for word in debt_keywords):
+            if 'current' in combined_text and 'debt' in mapping_lower:
+                score += 2.5
+            elif 'noncurrent' in mapping_lower and 'debt' in mapping_lower:
+                score += 2.5
+            elif 'term' in combined_text and 'noncurrent' in mapping_lower and 'debt' in mapping_lower:
+                score += 3.0
+        else:
+            # Penalize debt mappings for non-debt accounts
+            if 'debt' in mapping_lower:
+                score -= 1.0
+        
+        # Specific shareholder loan mapping
+        if any(word in all_keywords for word in ['shrhlder', 'shareholder']) and 'loan' in combined_text:
+            if 'current' in combined_text and mapping_lower == 'liability:current:debt':
+                score += 4.0
+            elif 'noncurrent' in combined_text and mapping_lower == 'liability:noncurrent:debt':
+                score += 4.0
+        
+        # Revenue/Sales
+        if any(word in all_keywords for word in ['sales', 'revenue']):
+            if 'income' in mapping_lower and 'operating' in mapping_lower:
+                score += 2.0
+        
+        # Cost of Goods Sold
+        if any(word in all_keywords for word in ['cogs', 'cos', 'cost']):
+            if 'costofgoodssold' in mapping_lower.replace(':', ''):
+                score += 2.0
+        
+        # Payroll
+        if any(word in all_keywords for word in ['payroll', 'wages', 'salary']):
+            if 'payroll' in mapping_lower:
+                score += 2.0
+        
+        # Rent
+        if 'rent' in all_keywords:
+            if 'rent' in mapping_lower:
+                score += 2.0
+        
+        # Interest - more specific matching to avoid false positives
+        if any(word in all_keywords for word in ['interest']):
+            # Check if it's an operating expense interest (should be non-operating)
+            if 'operating' in combined_text and 'expenses' in combined_text:
+                if mapping_lower == 'expense:nonoperating:interest':
+                    score += 3.0  # Strong boost for operating expenses interest -> non-operating interest
+            # Only map to interest if it's clearly loan/debt related
+            elif any(word in all_keywords for word in ['loan', 'debt', 'borrowing', 'finance']) or 'interest expense' in combined_text.lower():
+                if 'interest' in mapping_lower:
+                    score += 2.0
+            else:
+                # Penalize interest mapping for non-loan related accounts
+                if 'interest' in mapping_lower:
+                    score -= 2.0
+                # If account has "interest" but isn't loan-related, favor generic operating over specific categories
+                if 'operating' in mapping_lower and mapping_lower == 'expense:operating':
+                    score += 1.0  # Boost generic operating for ambiguous cases
+        
+        # Bank charges and fees
+        if any(word in all_keywords for word in ['bank', 'charge', 'fee']) and any(word in all_keywords for word in ['charge', 'fee']):
+            if 'bankandcreditcardfees' in mapping_lower.replace(':', ''):
+                score += 2.5
+        
+        # Auto expenses
+        if 'auto' in all_keywords:
+            if mapping_lower == 'expense:operating':
+                score += 2.0
+        
+        # Taxes - only boost tax mappings for accounts that clearly mention tax
+        if any(word in all_keywords for word in ['tax', 'taxes']):
+            if 'tax' in mapping_lower:
+                score += 2.0
+        else:
+            # Penalize tax mappings for accounts that don't mention tax
+            if 'tax' in mapping_lower:
+                score -= 1.5
+        
+        # Prefer base operating categories for generic accounts
+        if not any(word in all_keywords for word in ['cash', 'bank', 'receivable', 'payable', 'inventory', 'tax', 'payroll', 'debt', 'loan']):
+            if mapping_lower in ['expense:operating', 'income:operating']:
+                score += 2.0  # Strong boost for base operating categories for generic accounts
+            elif mapping_lower.endswith(':other'):
+                score += 1.0  # Moderate boost for "other" categories for generic accounts
+        
+        return score
+
+    def _get_default_mapping(self, fs_classification, account_name, account_type):
+        """Get default mapping when no good match is found"""
+        combined_text = f"{fs_classification} {account_name}".lower()
+        
+        # Default expense mapping
+        if account_type == 'Expense':
+            return 'expense:operating'
+        
+        # Default income mapping
+        if account_type == 'Income':
+            return 'income:operating'
+        
+        # Default asset mapping - use more general categories
+        if account_type == 'Assets':
+            return 'asset:current:other'  # Default to current:other for assets
+        
+        # Default liability mapping - use more general categories
+        if account_type == 'Liabilities':
+            return 'liability:current:other'  # Default to current:other for liabilities
+        
+        return ''
 
     def determine_account_type(self, fs_classification):
         """Determine Account Type based on Financial Statement Classification Path"""
