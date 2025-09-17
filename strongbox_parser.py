@@ -36,6 +36,7 @@ class StrongboxParser:
         self.non_usd_transactions = []  # Store non-USD transactions
         self.non_usd_headers = ['Journal ID', 'Type', 'Journal Entry Description', 'Posted Date', 'Account ID', 'Journal Line Description', 'Name', 'Debit Amount', 'Credit Amount', 'Transaction Currency']  # Headers for non-USD transactions tab
         self.mapping_categories = {}  # Store mapping categories from Excel file
+        self.account_id_map = {}  # Map Original Account Id -> (possibly disambiguated) display Account ID
 
     def print_and_log(self, message):
         """Print to console and also log to GUI if available"""
@@ -473,6 +474,19 @@ class StrongboxParser:
                     'Debit Amount': df_copy['Debit'],
                     'Credit Amount': df_copy['Credit']
                 })
+
+                # If available, remap Account ID to the disambiguated ID using Original Account Id from TXN
+                try:
+                    if 'Account Id' in df_copy.columns:
+                        # TXN Account Id corresponds to TB 'Original Account Id'
+                        df_copy['Account Id'] = df_copy['Account Id'].astype(str).str.strip()
+                        if hasattr(self, 'account_id_map') and self.account_id_map:
+                            # Build mapped Account ID per row using Original Account Id
+                            mapped_ids = df_copy['Account Id'].map(self.account_id_map)
+                            # Where mapping exists, override the Account ID in processed_df
+                            processed_df['Account ID'] = mapped_ids.fillna(processed_df['Account ID'])
+                except Exception as je_map_err:
+                    self.print_and_log(f"WARNING: Failed to map JE Account IDs via Original Account Id: {je_map_err}")
                 
                 processed_sheets[sheet_name] = processed_df  # Store in dictionary with sheet name as key
                 self.print_and_log(f"Successfully processed sheet: {sheet_name}")
@@ -576,6 +590,45 @@ class StrongboxParser:
         # Load mapping categories for automapping
         self.load_mapping_categories()
         
+        # Build Account ID disambiguation map for duplicate name-based IDs and apply to TB & later JE
+        try:
+            tb_df_for_mapping = tb_data[['Account Id', 'Original Account Id', 'Account Name']].copy()
+            tb_df_for_mapping['Account Id'] = tb_df_for_mapping['Account Id'].astype(str).str.strip()
+            tb_df_for_mapping['Account Name'] = tb_df_for_mapping['Account Name'].astype(str).str.strip()
+            tb_df_for_mapping['Original Account Id'] = tb_df_for_mapping['Original Account Id'].astype(str).str.strip()
+
+            # Rows where display Account Id came from Account Name (i.e., number/code blank)
+            used_name_mask = (tb_df_for_mapping['Account Name'] != '') & (tb_df_for_mapping['Account Id'] == tb_df_for_mapping['Account Name'])
+            duplicate_name_groups = tb_df_for_mapping[used_name_mask].groupby('Account Id').size()
+            duplicate_names = set(duplicate_name_groups[duplicate_name_groups > 1].index)
+
+            account_id_map = {}
+            # Assign enumerated names for duplicates based on stable order of Original Account Id
+            for name in duplicate_names:
+                group = tb_df_for_mapping[(used_name_mask) & (tb_df_for_mapping['Account Id'] == name)].copy()
+                group = group.sort_values('Original Account Id')
+                for i, (_, r) in enumerate(group.iterrows(), start=1):
+                    account_id_map[r['Original Account Id']] = f"{name}({i})"
+
+            # Default mapping for all other accounts (including unique names and code-based IDs)
+            for _, r in tb_df_for_mapping.iterrows():
+                orig = r['Original Account Id']
+                if orig not in account_id_map:
+                    account_id_map[orig] = r['Account Id']
+
+            # Store map for use in journal entries
+            self.account_id_map = account_id_map
+
+            # Apply mapping to the Trial Balance 'Account ID' column
+            mapped_ids = tb_df_for_mapping['Original Account Id'].map(self.account_id_map)
+            trial_balance['Account ID'] = list(mapped_ids)
+        except Exception as map_err:
+            self.print_and_log(f"WARNING: Failed to build Account ID disambiguation map: {map_err}")
+            try:
+                self.account_id_map = {str(oid).strip(): str(aid).strip() for oid, aid in zip(tb_data['Original Account Id'], tb_data['Account Id'])}
+            except Exception:
+                self.account_id_map = {}
+
         # Apply the class method to populate the Account Type column
         trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
 
