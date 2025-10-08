@@ -630,7 +630,7 @@ class StrongboxParser:
                 self.account_id_map = {}
 
         # Apply the class method to populate the Account Type column
-        trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance['Account Description'].apply(self.determine_account_type)
+        trial_balance['Account Type \n(see Mapping Categories tab)'] = trial_balance.apply(lambda r: self.determine_account_type(r['Account Description'], r['Account Name']), axis=1)
 
         # Apply automapping to populate the Account Mapping column
         self.print_and_log("\n🤖 Running automapper to populate Account Mapping column...")
@@ -642,6 +642,23 @@ class StrongboxParser:
             account_type = row['Account Type \n(see Mapping Categories tab)']
             account_name = row['Account Name']
             
+            # Special-case: Non-Operating Income and Expenses -> force nonOperating mapping by account type
+            try:
+                if isinstance(fs_classification, str) and fs_classification.startswith('Net Income → Total Non-Operating Income and Expenses'):
+                    if account_type == 'Income':
+                        best_mapping = 'income:nonOperating'
+                    elif account_type == 'Expense':
+                        best_mapping = 'expense:nonOperating'
+                    else:
+                        best_mapping = ''
+                    if best_mapping:
+                        mapped_count += 1
+                    account_mappings.append(best_mapping)
+                    continue
+            except Exception:
+                # Fall through to normal mapping if any unexpected issue occurs
+                pass
+
             if account_type and fs_classification:
                 best_mapping = self.find_best_mapping(fs_classification, account_type, account_name)
                 if best_mapping:
@@ -991,6 +1008,12 @@ class StrongboxParser:
         trial_balance = self.create_trial_balance()
         journal_entries_dict = self.create_journal_entries()
 
+        # Post-process: ensure all JE Account IDs exist in Trial Balance
+        try:
+            trial_balance = self._append_missing_je_accounts_to_trial_balance(trial_balance, journal_entries_dict)
+        except Exception as append_err:
+            self.print_and_log(f"⚠️ Warning appending missing JE Account IDs to Trial Balance: {append_err}")
+
         # Clean data for Excel
         trial_balance = self._clean_data_for_excel(trial_balance)
         for sheet_name in journal_entries_dict:
@@ -1016,6 +1039,111 @@ class StrongboxParser:
 
         self.print_and_log(f'✅ Output file created: {output_file}')
         return output_file
+
+    def _append_missing_je_accounts_to_trial_balance(self, trial_balance, journal_entries_dict):
+        """Append Account IDs from JE sheets that are missing in the Trial Balance.
+
+        - Looks up Account Name from COA tab (Account Number/Code -> Account Name)
+        - Sets Beginning/Ending balances to 0.0
+        - Guesses Account Type from account name (Assets, Liabilities, Equity, Income, Expense)
+        """
+        # Collect existing IDs from TB
+        tb_ids = set(str(x).strip() for x in trial_balance['Account ID'] if pd.notna(x) and str(x).strip())
+
+        # Collect all Account IDs from JE sheets
+        je_ids = set()
+        for df in journal_entries_dict.values():
+            if 'Account ID' in df.columns:
+                for val in df['Account ID']:
+                    val_str = str(val).strip()
+                    if val_str and val_str.lower() != 'nan':
+                        je_ids.add(val_str)
+
+        missing_ids = sorted(list(je_ids - tb_ids))
+        if not missing_ids:
+            return trial_balance
+
+        self.print_and_log(f"📌 Found {len(missing_ids)} Account IDs in JE not present in Trial Balance. Appending...")
+
+        # Build COA lookup: Account Number/Code -> Account Name
+        coa_lookup = {}
+        try:
+            # Prefer pandas for simplicity; fallback to openpyxl if needed
+            coa_df = pd.read_excel(self.source_file, sheet_name='COA', dtype=str)
+            # Identify possible number/code columns
+            code_cols = [c for c in coa_df.columns if str(c).strip().lower() in ['account number/code', 'account number', 'account code']]
+            name_col = None
+            for c in coa_df.columns:
+                if str(c).strip().lower() == 'account name':
+                    name_col = c
+                    break
+            if code_cols and name_col:
+                for _, row in coa_df.iterrows():
+                    code_val = None
+                    for code_col in code_cols:
+                        val = row.get(code_col)
+                        if pd.notna(val) and str(val).strip():
+                            code_val = str(val).strip()
+                            break
+                    if code_val is not None:
+                        coa_lookup[code_val] = str(row.get(name_col, '')).strip()
+        except Exception as e:
+            self.print_and_log(f"⚠️ Unable to read COA tab for name lookup: {e}")
+
+        # Prepare rows to append
+        append_rows = []
+        for account_id in missing_ids:
+            account_name = coa_lookup.get(account_id, '')
+            # If COA has no name for this code, default name to the Account ID itself
+            if not account_name:
+                account_name = account_id
+            guessed_type = self._guess_account_type_from_name(account_name or account_id)
+            append_rows.append({
+                'Account ID': account_id,
+                'Account Name': account_name,
+                'Beginning Balance \n(Prior Period Balance)': 0.0,
+                'Ending Balance': 0.0,
+                'Account Type \n(see Mapping Categories tab)': guessed_type,
+                'Account Mapping \n(see Mapping Categories tab)': '',
+                'Account Description': ''
+            })
+
+        if append_rows:
+            trial_balance = pd.concat([trial_balance, pd.DataFrame(append_rows)], ignore_index=True)
+            self.print_and_log(f"✅ Appended {len(append_rows)} accounts to Trial Balance")
+
+        return trial_balance
+
+    def _guess_account_type_from_name(self, account_name):
+        """Guess account type from account name using simple keyword heuristics."""
+        name = (account_name or '').lower()
+        # Income / Revenue
+        income_keywords = ['income', 'revenue', 'sales']
+        if any(k in name for k in income_keywords):
+            return 'Income'
+
+        # Expense / Costs
+        expense_keywords = ['expense', 'expenses', 'cost', 'cogs', 'cos', 'rent', 'utilities', 'payroll', 'wages', 'salary', 'supplies', 'fee', 'fees']
+        if any(k in name for k in expense_keywords):
+            return 'Expense'
+
+        # Assets
+        asset_keywords = ['cash', 'bank', 'checking', 'savings', 'ar', 'receivable', 'receivables', 'inventory', 'fixed asset', 'equipment', 'property', 'asset']
+        if any(k in name for k in asset_keywords):
+            return 'Assets'
+
+        # Liabilities
+        liability_keywords = ['ap', 'payable', 'payables', 'loan', 'loans', 'debt', 'note payable', 'mortgage', 'credit card']
+        if any(k in name for k in liability_keywords):
+            return 'Liabilities'
+
+        # Equity
+        equity_keywords = ['equity', 'capital', 'retained earnings', 'member distribution', 'dividend']
+        if any(k in name for k in equity_keywords):
+            return 'Equity'
+
+        # Default guess
+        return 'Expense'
 
     def process_data(self):
         """Process the data and create output file"""
